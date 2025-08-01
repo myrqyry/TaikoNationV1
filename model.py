@@ -8,223 +8,217 @@ import tensorflow as tf
 import numpy as np
 import os
 
-def preprocess():
-    '''
-    this function preprocesses the dataset for use in the model
+# --- Constants ---
+# Preprocessing
+TEST_DATA_INDICES = [2, 5, 9, 82, 28, 22, 81, 43, 96, 97]
+SONG_CHUNK_SIZE = 16
+NOTE_CHUNK_SIZE = 12
+NOTE_VECTOR_SIZE = 7
+SONG_VECTOR_SIZE = 80
+INPUT_CHART_DIR = "input_charts_nr"
+INPUT_SONG_DIR = "input_songs"
 
-    1. load appropriate files
-    2. slice input into needed chunks then flatten
-    3. add these to train/test lists as specified
-    '''
+# Model Architecture
+CONV_FILTERS_1 = 16
+CONV_FILTER_SIZE_1 = 3
+CONV_FILTERS_2 = 32
+CONV_FILTER_SIZE_2 = 3
+FC_UNITS_1 = 128
+LSTM_UNITS_1 = 64
+LSTM_UNITS_2 = 64
+OUTPUT_UNITS = 28
+LEARNING_RATE = 0.000005
+BATCH_SIZE = 1
+NUM_EPOCHS = 100
 
-    charts = os.listdir(path="input_charts")
-    songs = os.listdir(path="input_songs")
-    fail_count = 0
-
-    trainX = []
-    trainY = []
-    testX = []
-    testY = []
-
-    test_data = [2, 5, 9, 82, 28, 22, 81, 43, 96, 97]
-    num = 0
-    for chart in charts:
-        # split the testing / training data
-        training = True
-        for h in test_data:
-            if num == h:
-                print("test_data")
-                training = False
-        
-        # locate the matching song
-        id_number = chart.split("_")[0]
-        song = None
-        for s in songs:
-            if s.split()[0] == id_number:
-                song = s
-                break
-        
-        if song == None:
-            raise FileNotFoundError
-        else:
-            print(song, chart)
-
-        # load the song data from memory map and reshape appropriately        
-        song_mm = np.load("input_songs/" + song, mmap_mode="r")
+def _load_song_data(song_path):
+    """Loads and reshapes the song data from a .npy file."""
+    try:
+        song_mm = np.load(song_path, mmap_mode="r")
         song_data = np.frombuffer(buffer=song_mm, dtype=np.float32, count=-1)
         song_data = song_data[0:song_mm.shape[0]*song_mm.shape[1]]
-        song_data = np.reshape(song_data, song_mm.shape)
+        return np.reshape(song_data, song_mm.shape)
+    except FileNotFoundError:
+        print(f"Error: Song file not found at {song_path}")
+        return None
+    except Exception as e:
+        print(f"An error occurred while loading song data: {e}")
+        return None
 
-        # load the note data as above
-        if song_mm[0][0] != song_data[0][0]:
-            fail_count += 1
-        note_mm = np.load("input_charts_nr/" + chart, mmap_mode="r")
+def _load_note_data(chart_path, song_data_len):
+    """Loads, reshapes, and pads the note data from a .npy file."""
+    try:
+        note_mm = np.load(chart_path, mmap_mode="r")
         note_data = np.frombuffer(note_mm, dtype=np.int32, count=-1)
-        note_data = np.reshape(note_data, [len(note_mm), 7])
+        note_data = np.reshape(note_data, [len(note_mm), NOTE_VECTOR_SIZE])
 
-        # pad the note data with 0's so it matches the end of the song, adding exactly enough to make life easier for myself below
-        diff = len(song_data) - len(note_data)
-        padding = []
-        for i in range(diff + 16):
-            padding.append(np.zeros(7))
+        # Pad the note data
+        diff = song_data_len - len(note_data)
+        padding = np.zeros((diff + SONG_CHUNK_SIZE, NOTE_VECTOR_SIZE))
+        return np.append(note_data, padding, axis=0)
+    except FileNotFoundError:
+        print(f"Error: Chart file not found at {chart_path}")
+        return None
+    except Exception as e:
+        print(f"An error occurred while loading note data: {e}")
+        return None
 
-        note_data = np.append(note_data, padding, axis=0)
+def _package_data(song_data, note_data, training):
+    """Packages the song and note data into training and testing sets."""
+    trainX, trainY, testX, testY = [], [], [], []
 
-        # package up the last 16 blocks of data, which require padding in the song_input because the song ends
-        for h in range(16):
-            song_input = []
-            note_input = []
-            output_chunk = []
-            for k in range(16):
-                if h - k < 0:
-                    song_input.append(np.zeros([80]))
-                    if k < 12:
-                        note_input.append(np.zeros([7]))
-                    elif k != 15:
-                        note_input.append(np.ones([7]))
-                    if k > 11:
-                        output_chunk.append(np.zeros([7]))
-                else:
-                    song_input.append(song_data[h-k])
-                    if k < 12:
-                        note_input.append(note_data[h-k])
-                    elif k != 15:
-                        note_input.append(np.ones([7]))
-                    if k > 11: 
-                        output_chunk.append(note_data[h-k])
-            song_input = np.array(song_input).flatten()
-            note_input = np.array(note_input).flatten()
-            input_chunk = np.concatenate([song_input, note_input])
-            output_chunk = np.concatenate(output_chunk)
-            output_chunk = np.reshape(output_chunk, [4, 7])
-
-            if training:
-                trainX.append(input_chunk)
-                trainY.append(output_chunk)
-            else:
-                testX.append(input_chunk)
-                testY.append(output_chunk)
-        
-        # package up the data in 1445-size 1D tensors as needed for input, then append to appropriate Train / Test list
-        for j in range(16, len(song_data)):
-            song_input = []
-            note_input = []
-            output_chunk = []
-            for k in range(16):
-                song_input.append(song_data[j-k])
-                if k < 12:
-                    note_input.append(note_data[j-k])
+    # Package up the last 16 blocks of data
+    for h in range(SONG_CHUNK_SIZE):
+        song_input, note_input, output_chunk = [], [], []
+        for k in range(SONG_CHUNK_SIZE):
+            if h - k < 0:
+                song_input.append(np.zeros([SONG_VECTOR_SIZE]))
+                if k < NOTE_CHUNK_SIZE:
+                    note_input.append(np.zeros([NOTE_VECTOR_SIZE]))
                 elif k != 15:
-                    note_input.append(np.ones([7]))
+                    note_input.append(np.ones([NOTE_VECTOR_SIZE]))
                 if k > 11:
-                    output_chunk.append(note_data[j-k])
-    
-            song_input = np.array(song_input).flatten()
-            note_input = np.array(note_input).flatten()
-            input_chunk = np.concatenate([song_input, note_input])
-            output_chunk = np.concatenate(output_chunk)
-            output_chunk = np.reshape(output_chunk, [4, 7])
-            if training:
-                trainX.append(input_chunk)
-                trainY.append(output_chunk)
+                    output_chunk.append(np.zeros([NOTE_VECTOR_SIZE]))
             else:
-                testX.append(input_chunk)
-                testY.append(output_chunk)
+                song_input.append(song_data[h-k])
+                if k < NOTE_CHUNK_SIZE:
+                    note_input.append(note_data[h-k])
+                elif k != 15:
+                    note_input.append(np.ones([NOTE_VECTOR_SIZE]))
+                if k > 11:
+                    output_chunk.append(note_data[h-k])
 
-        num += 1
+        input_chunk = np.concatenate([np.array(song_input).flatten(), np.array(note_input).flatten()])
+        output_chunk = np.reshape(np.concatenate(output_chunk), [4, NOTE_VECTOR_SIZE])
 
-    # ensure things are working
-    print(len(trainX), "train X", len(trainY), "train Y")
-    print(len(trainX[0]), "trainX 0", len(testX[0]), "testX 0")
-    print(len(testX), "test X", len(testY), "test Y")
-    print(len(trainY[0]), "trainY 0", len(testY[0]), "testY 0")
+        if training:
+            trainX.append(input_chunk)
+            trainY.append(output_chunk)
+        else:
+            testX.append(input_chunk)
+            testY.append(output_chunk)
 
-    return trainX,trainY,testX,testY
+    # Package up the rest of the data
+    for j in range(SONG_CHUNK_SIZE, len(song_data)):
+        song_input, note_input, output_chunk = [], [], []
+        for k in range(SONG_CHUNK_SIZE):
+            song_input.append(song_data[j-k])
+            if k < NOTE_CHUNK_SIZE:
+                note_input.append(note_data[j-k])
+            elif k != 15:
+                note_input.append(np.ones([NOTE_VECTOR_SIZE]))
+            if k > 11:
+                output_chunk.append(note_data[j-k])
 
-def main():
+        input_chunk = np.concatenate([np.array(song_input).flatten(), np.array(note_input).flatten()])
+        output_chunk = np.reshape(np.concatenate(output_chunk), [4, NOTE_VECTOR_SIZE])
+
+        if training:
+            trainX.append(input_chunk)
+            trainY.append(output_chunk)
+        else:
+            testX.append(input_chunk)
+            testY.append(output_chunk)
+
+    return trainX, trainY, testX, testY
+
+def preprocess():
     '''
-    Initial Architecture:
-    Input: size 1385, [16, 80] and [7, 15] flattened and concatenated
-
-    after unpacking the input, we put the song data through the following layers
-
-    conv - 16 filters, filter_size 3, relu
-        dropout - 80%
-        max_pool - kernel 2
-
-    conv - 32 filters, filter_size 3, relu
-        max_pool - kernel 2
-
-    fully connected - 128 nodes, relu
-
-    from here, we bring in the previous data and do some multiplication to reshape
-    the data to [16, 88] for input into the following layers
-
-    lstm - 64 nodes, dropout 80%, relu
-        reshape to [8,8]
-
-    lstm - 64 nodes, dropout 80%, relu
-
-    fully connected - 44 nodes, softmax (output layer)
+    This function preprocesses the dataset for use in the model.
     '''
-    # commenting this and the last 2 lines out should let you run this script without the dataset
-    trainX, trainY, testX, testY = preprocess()
-    
-    # unpack the input data
+    charts = os.listdir(path=INPUT_CHART_DIR)
+    songs = os.listdir(path=INPUT_SONG_DIR)
+
+    trainX, trainY, testX, testY = [], [], [], []
+
+    for i, chart in enumerate(charts):
+        is_training = i not in TEST_DATA_INDICES
+
+        id_number = chart.split("_")[0]
+        song_name = next((s for s in songs if s.split()[0] == id_number), None)
+
+        if not song_name:
+            print(f"Warning: No matching song found for chart {chart}")
+            continue
+
+        print(song_name, chart)
+
+        song_data = _load_song_data(os.path.join(INPUT_SONG_DIR, song_name))
+        if song_data is None:
+            continue
+
+        note_data = _load_note_data(os.path.join(INPUT_CHART_DIR, chart), len(song_data))
+        if note_data is None:
+            continue
+
+        packaged_data = _package_data(song_data, note_data, is_training)
+        trainX.extend(packaged_data[0])
+        trainY.extend(packaged_data[1])
+        testX.extend(packaged_data[2])
+        testY.extend(packaged_data[3])
+
+    print(f"{len(trainX)} train X, {len(trainY)} train Y")
+    print(f"{len(testX)} test X, {len(testY)} test Y")
+
+    return trainX, trainY, testX, testY
+
+def build_model():
+    """Builds and returns the TaikoNation model."""
     net = tflearn.input_data([None, 1385])
     song = tf.slice(net, [0,0], [-1, 1280])
-    song = tf.reshape(song, [-1, 16, 80])
+    song = tf.reshape(song, [-1, SONG_CHUNK_SIZE, SONG_VECTOR_SIZE])
     prev_notes = tf.slice(net, [0,1280], [-1, 105])
-    prev_notes = tf.reshape(prev_notes, [-1, 7, 15])
+    prev_notes = tf.reshape(prev_notes, [-1, NOTE_VECTOR_SIZE, 15])
 
-    # two conv layers with a 20% dropout layer after the first and max_pooling after each
-    song_encoder = tflearn.conv_1d(song, nb_filter=16, filter_size=3, activation="relu")
+    song_encoder = tflearn.conv_1d(song, nb_filter=CONV_FILTERS_1, filter_size=CONV_FILTER_SIZE_1, activation="relu")
     song_encoder = tflearn.dropout(song_encoder, keep_prob=0.8)
     song_encoder = tflearn.max_pool_1d(song_encoder, kernel_size=2)
-    print(song_encoder.shape, "song_encoder shape after conv 1")
 
-    song_encoder = tflearn.conv_1d(song, nb_filter=32, filter_size=3, activation="relu")
+    song_encoder = tflearn.conv_1d(song_encoder, nb_filter=CONV_FILTERS_2, filter_size=CONV_FILTER_SIZE_2, activation="relu")
     song_encoder = tflearn.max_pool_1d(song_encoder, kernel_size=2)
-    print(song_encoder.shape, "song_encoder shape after conv 2")
 
-    song_encoder = tflearn.fully_connected(song_encoder, n_units=128, activation="relu")
-    print(song_encoder.shape, "song_encoder shape after fc")
+    song_encoder = tflearn.fully_connected(song_encoder, n_units=FC_UNITS_1, activation="relu")
     song_encoder = tf.reshape(song_encoder, [-1,8,16])
 
-    # split song data into past chunks and current chunk
     past_chunks = tf.slice(song_encoder, [0,0,0], [-1, 8, 15])
     curr_chunk = tf.slice(song_encoder, [0,0,15], [-1, 8, 1])
 
-    # combine the note data with the processed song data
     lstm_input = tf.unstack(past_chunks, axis=1)
     lstm_input = tf.math.multiply(lstm_input, prev_notes)
-    lstm_input = tf.reshape(lstm_input, [-1]) # flatten this to add on the current chunk
-    
-    # add on the final segment which does not have data yet
+    lstm_input = tf.reshape(lstm_input, [-1])
+
     curr_chunk = tf.math.multiply(curr_chunk, tf.ones([8, 15]))
     curr_chunk = tf.reshape(curr_chunk, [-1])
     lstm_input = tf.concat([lstm_input, curr_chunk], 0)
 
-    lstm_input = tf.reshape(lstm_input, [-1, 16, 88]) # reshape to desired shape
-    print(lstm_input.shape, "shape of lstm input")
-    
-    # 2 lstm layers, then a final fully connected softmax layer
-    lstm_input = tflearn.lstm(lstm_input, 64, dropout=0.8, activation="relu")
+    lstm_input = tf.reshape(lstm_input, [-1, 16, 88])
+
+    lstm_input = tflearn.lstm(lstm_input, LSTM_UNITS_1, dropout=0.8, activation="relu")
     lstm_input = tf.reshape(lstm_input, [-1, 8, 8])
-    print(lstm_input.shape, "lstm_input shape after lstm 1 + reshape to 8 by 8 (64)")
 
-    lstm_input = tflearn.lstm(song_encoder, 64, dropout=0.8, activation="relu")
-    print(lstm_input.shape, "lstm_input shape after lstm 2")
+    lstm_input = tflearn.lstm(lstm_input, LSTM_UNITS_2, dropout=0.8, activation="relu")
 
-    lstm_input = tflearn.fully_connected(lstm_input, n_units=28, activation="softmax")
+    lstm_input = tflearn.fully_connected(lstm_input, n_units=OUTPUT_UNITS, activation="softmax")
     lstm_input = tflearn.reshape(lstm_input, [-1,4,7])
-    print(lstm_input.shape, "lstm_input shape after final fc softmax layer")
 
-    # setting up final parameters and running the fit
-    network = tflearn.regression(lstm_input, optimizer = "adam", loss="categorical_crossentropy", learning_rate=0.000005, batch_size=1)
-    model = tflearn.DNN(network, checkpoint_path="model_rt.tfl")
-    model.load("model.tfl")
-    model.fit(trainX, trainY, validation_set=(testX, testY), show_metric=True, batch_size=1, n_epoch=100) # currently set for retraining
+    network = tflearn.regression(lstm_input, optimizer = "adam", loss="categorical_crossentropy", learning_rate=LEARNING_RATE, batch_size=BATCH_SIZE)
+    return tflearn.DNN(network, checkpoint_path="model_rt.tfl")
+
+def main():
+    '''
+    Main function to preprocess data, build, train, and save the model.
+    '''
+    trainX, trainY, testX, testY = preprocess()
+
+    model = build_model()
+
+    try:
+        model.load("model.tfl")
+    except Exception as e:
+        print(f"No saved model found. Starting training from scratch. Error: {e}")
+
+    model.fit(trainX, trainY, validation_set=(testX, testY), show_metric=True, batch_size=BATCH_SIZE, n_epoch=NUM_EPOCHS)
     model.save("model_rt.tfl")
-    
-main()
+
+if __name__ == "__main__":
+    main()
