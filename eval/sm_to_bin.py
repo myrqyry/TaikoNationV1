@@ -1,131 +1,126 @@
 import numpy as np
 import sys
+import logging
+import re
 
-def get_info(lines):
+# --- Logging ---
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
-    ind = 0
-    while lines[ind][:4] != "#OFF":
-        ind += 1
+def parse_sm_metadata(lines):
+    """Parses the metadata from the .sm file content."""
+    metadata = {}
+    for line in lines:
+        if line.startswith('#'):
+            match = re.match(r"#([^:]+):([^;]+);", line)
+            if match:
+                key, value = match.groups()
+                metadata[key.strip()] = value.strip()
+    return metadata
 
-    offset = float(lines[ind][8:len(lines[ind]) - 1]) * 100
+def get_bpms(lines):
+    """Parses BPM changes from the .sm file content."""
+    bpms = {}
+    for line in lines:
+        if line.startswith('#BPMS'):
+            try:
+                parts = line.split(':')[1].split(',')
+                for part in parts:
+                    beat, bpm = part.split('=')
+                    bpms[float(beat)] = float(bpm)
+            except (ValueError, IndexError) as e:
+                logging.error(f"Could not parse BPMs: {e}")
+    return bpms
 
-    while lines[ind][:4] != "#BPM":
-        ind += 1
+def get_offset(lines):
+    """Parses the offset from the .sm file content."""
+    for line in lines:
+        if line.startswith('#OFFSET'):
+            try:
+                return float(line.split(':')[1].strip(';'))
+            except (ValueError, IndexError) as e:
+                logging.error(f"Could not parse offset: {e}")
+    return 0.0
 
-    if lines[ind][len(lines[ind])-1] == ";":
-        print("one bpm")
-        i = 0
-        while lines[ind][i] != "=":
-            i += 1
+def get_notes_section(lines):
+    """Extracts the notes section for a specific chart type."""
+    in_notes_section = False
+    notes_lines = []
+    for line in lines:
+        if re.match(r'#NOTES:', line):
+            # This is just an example, you might need to select a specific chart type
+            # e.g., dance-single, challenge, etc.
+            in_notes_section = True
+            continue
+        if in_notes_section:
+            if line.startswith(';'):
+                break
+            notes_lines.append(line)
+    return notes_lines
 
-        bpm = float(lines[ind][i+1 : len(lines[ind]) - 1])
-        print(bpm)
-    else:
-        print("multi bpm")
-        bpm = {}
-        i = 0
-        while lines[ind][i] != "=":
-            i += 1
+def convert_sm_to_binary(note_lines, bpms, offset):
+    """Converts the .sm notes to a binary representation."""
+    note_times = []
+    current_time = -offset * 1000  # ms
+    current_bpm = next(iter(bpms.values())) if bpms else 60.0
 
-        bpm[0] = float(lines[ind][i+1 : len(lines[ind]) - 1])
-        ind += 1
-        while lines[ind][0] != ";":
-            j = 0
-            while lines[ind][j] != "=":
-                j += 1
-            key = float(lines[ind][1:j])
-            value = float(lines[ind][j+1:len(lines[ind])])
-            bpm[key] = value
-            ind += 1
-    print(bpm)
+    for i, measure in enumerate("".join(note_lines).split(',')):
+        measure = measure.strip()
+        if not measure:
+            continue
 
-    return offset, bpm
+        notes_in_measure = len(measure) / 4 # Assuming 4 characters per note
+        if notes_in_measure == 0:
+            continue
 
+        beat_duration = 60 * 1000 / current_bpm
+        note_duration = beat_duration * 4 / notes_in_measure
 
-def main():
-    f = open(sys.argv[1], "r")
-    lines = f.read().splitlines()
-    f.close()
+        for j, note in enumerate(measure):
+            if note in '124': # Note or hold head
+                note_times.append(current_time)
+            current_time += note_duration
 
-    bin_filename = sys.argv[1] + "_bin.npy"
-    time_filename = sys.argv[1] + "_time.npy"
-
-    offset, bpm = get_info(lines)
-    multi_bpm = False
-    
-    if type(bpm) == dict:
-        print("dict")
-        line_time = 4 / (bpm[0] / 60)
-        multi_bpm = True
-    else:
-        line_time = 4 / (bpm / 60)
-
-    current_time = offset
-    
-    c = 0
-    while lines[c][:2] != "//":
-        c += 1
-    
-    while lines[c][0] != "0":
-        c += 1
-
-    curr = c
-    count = 0
-    for i in range(c, len(lines)):
-        if lines[i] == "," or lines[i] == ";":
-            count += 1
-
-    print(count)
-    note_time = []
-    note_count = 0
-    beat = 0
-    bpm_swaps = 0
-
-    for i in range(count):
-        print("measure", i)
-        m_count = 0
-        measure = []
-        while lines[curr] != "," and lines[curr] != ";":
-            m_count += 1
-            measure.append(lines[curr])
-            curr += 1
-        time = (line_time / m_count)*1000
-        beat_div = 4 / m_count
-        print(time)
-        for note in measure:
-            if "1" in note or "2" in note:
-                note_time.append(current_time)
-                print("NOTE AT ", current_time)
-                note_count += 1
-            current_time += time
-            if multi_bpm and beat in bpm.keys():
-                print("swapping bpm")
-                line_time = 4 / (bpm[beat] / 60)
-                time = (line_time / m_count)*1000
-                bpm_swaps += 1
-            beat += beat_div
-        curr += 1
-
-    print("note count", note_count)
-    print("bpm swaps", bpm_swaps)
     bin_output = []
     out_time = 0
-    n = 0
-    for note in note_time:
-        while abs(note - out_time) > 23:
+    for note_time in sorted(note_times):
+        while abs(note_time - out_time) > 23:
             bin_output.append(0)
             out_time += 23
         bin_output.append(1)
-        n += 1
         out_time += 23
 
-    print(bin_output)
-    print(note_time)
-    print(len(note_time))
-    print(len(bin_output))
-    bin_output = np.array(bin_output)
-    np.save(bin_filename, bin_output)
-    np.save(time_filename, note_time)
-    return
+    return np.array(bin_output, dtype=np.int32), np.array(sorted(note_times), dtype=np.int32)
 
-main()
+def main():
+    """Main function to handle .sm file conversion."""
+    if len(sys.argv) < 2:
+        logging.error("Usage: sm_to_bin.py <file.sm>")
+        return
+
+    filepath = sys.argv[1]
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        logging.error(f"File not found: {filepath}")
+        return
+
+    metadata = parse_sm_metadata(lines)
+    bpms = get_bpms(lines)
+    offset = get_offset(lines)
+    note_lines = get_notes_section(lines)
+
+    if not note_lines:
+        logging.error("No notes found in the file.")
+        return
+
+    bin_output, time_output = convert_sm_to_binary(note_lines, bpms, offset)
+
+    bin_filename = f"{filepath}_bin.npy"
+    time_filename = f"{filepath}_time.npy"
+    np.save(bin_filename, bin_output)
+    np.save(time_filename, time_output)
+    logging.info(f"Successfully converted {filepath} to {bin_filename} and {time_filename}")
+
+if __name__ == "__main__":
+    main()
