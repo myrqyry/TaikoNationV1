@@ -3,8 +3,9 @@ import torch
 import numpy as np
 import re
 from torch.utils.data import Dataset, DataLoader
+import json
 
-from tokenization import TaikoTokenizer
+from tokenization import PatternLevelTokenizer
 from audio_processing import get_audio_features, augment_spectrogram
 
 # --- Constants ---
@@ -20,14 +21,14 @@ class TaikoTransformerDataset(Dataset):
     It loads song-chart pairs, processes them into aligned audio features and
     token sequences, and prepares them for training a sequence-to-sequence model.
     """
-    def __init__(self, all_samples, indices, is_train=True, max_sequence_length=512, time_quantization_ms=100, source_resolution_ms=23.2):
+    def __init__(self, all_samples, indices, tokenizer, is_train=True, max_sequence_length=512):
         self.is_train = is_train
         self.max_sequence_length = max_sequence_length
-        self.tokenizer = TaikoTokenizer(time_quantization=time_quantization_ms, source_resolution=source_resolution_ms)
+        self.tokenizer = tokenizer
         self.samples = [all_samples[i] for i in indices]
-        # Store for use in __getitem__
-        self.source_resolution_ms = source_resolution_ms
-        self.time_quantization_ms = time_quantization_ms
+        # Get these from the tokenizer to ensure consistency
+        self.source_resolution_ms = self.tokenizer.source_resolution
+        self.time_quantization_ms = self.tokenizer.time_quantization
 
     def __len__(self):
         return len(self.samples)
@@ -113,9 +114,30 @@ def collate_fn(batch):
 def get_transformer_data_loaders(config, fold_idx=0):
     """
     Creates and returns training and testing DataLoaders for a specific
-    cross-validation fold.
+    cross-validation fold, using the PatternLevelTokenizer.
     """
-    # 1. Prepare the full list of samples
+    # --- Load Top Patterns for Tokenizer ---
+    top_patterns = []
+    pattern_config = config.get('patterns', {})
+    if pattern_config.get('frequency_file'):
+        try:
+            with open(pattern_config['frequency_file'], 'r') as f:
+                freqs = json.load(f)
+
+            # Extract top N patterns from each n-gram length
+            for ngram_key, patterns in freqs.items():
+                sorted_patterns = sorted(patterns.items(), key=lambda item: item[1], reverse=True)
+                top_n = pattern_config.get('top_n_patterns_per_length', 10)
+                # Convert string representation of tuple back to tuple
+                top_patterns.extend([eval(p[0]) for p in sorted_patterns[:top_n]])
+
+            print(f"Loaded {len(top_patterns)} top patterns for the tokenizer.")
+        except FileNotFoundError:
+            print(f"Warning: Pattern frequency file not found. Proceeding with base tokenizer.")
+        except Exception as e:
+            print(f"Warning: Error loading pattern frequencies: {e}. Proceeding with base tokenizer.")
+
+    # 1. Prepare the full list of samples (with improved difficulty parsing)
     all_samples = []
     try:
         charts = sorted(os.listdir(path=INPUT_CHART_DIR))
@@ -126,10 +148,17 @@ def get_transformer_data_loaders(config, fold_idx=0):
             try:
                 id_number = chart_filename.split("_")[0]
                 if id_number in song_map:
-                    # Parse difficulty from filename, e.g., "... [oni].npy"
-                    difficulty_match = re.search(r'\[(.*?)\]', chart_filename)
-                    difficulty = difficulty_match.group(1) if difficulty_match else "unknown"
-
+                    basename = os.path.splitext(chart_filename)[0]
+                    difficulty = "unknown"
+                    bracket_match = re.search(r'\[([^\]]+)\]$', basename)
+                    if bracket_match:
+                        difficulty = bracket_match.group(1)
+                    else:
+                        last_underscore_pos = basename.rfind('_')
+                        if last_underscore_pos != -1:
+                            potential_difficulty = basename[last_underscore_pos + 1:]
+                            if 0 < len(potential_difficulty) <= 40:
+                                difficulty = potential_difficulty
                     all_samples.append({
                         "chart_path": os.path.join(INPUT_CHART_DIR, chart_filename),
                         "song_path": os.path.join(INPUT_SONG_DIR, song_map[id_number]),
@@ -150,23 +179,29 @@ def get_transformer_data_loaders(config, fold_idx=0):
 
     print(f"Fold {fold_idx + 1}/{config['training']['k_folds']}: {len(train_indices)} train, {len(val_indices)} validation samples.")
 
-    # 3. Create Datasets for the current fold
+    # 3. Create Datasets with the PatternLevelTokenizer
     data_config = config['data']
+
+    # Create a single tokenizer instance to be shared
+    tokenizer = PatternLevelTokenizer(
+        top_patterns=top_patterns,
+        time_quantization=data_config['time_quantization_ms'],
+        source_resolution=data_config['source_resolution_ms']
+    )
+
     train_dataset = TaikoTransformerDataset(
         all_samples,
         train_indices,
+        tokenizer,
         is_train=True,
         max_sequence_length=data_config['max_sequence_length'],
-        time_quantization_ms=data_config['time_quantization_ms'],
-        source_resolution_ms=data_config['source_resolution_ms']
     )
     val_dataset = TaikoTransformerDataset(
         all_samples,
         val_indices,
+        tokenizer,
         is_train=False,
         max_sequence_length=data_config['max_sequence_length'],
-        time_quantization_ms=data_config['time_quantization_ms'],
-        source_resolution_ms=data_config['source_resolution_ms']
     )
 
     # 4. Create DataLoaders
