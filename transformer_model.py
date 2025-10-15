@@ -132,3 +132,53 @@ class PatternAwareTransformer(TaikoTransformer):
 
         # 4. Project the refined features to the vocabulary space
         return self.fc_out(refined_output)
+
+
+class MultiTaskTaikoTransformer(PatternAwareTransformer):
+    """
+    Extends the PatternAwareTransformer to perform multi-task learning.
+    In addition to generating note sequences, it predicts auxiliary targets
+    like tempo and difficulty, which helps the model build a richer internal
+    representation of the music.
+    """
+    def __init__(self, num_difficulty_classes=5, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # --- Auxiliary Task Heads ---
+        # A head for tempo regression (predicting a single continuous value)
+        self.tempo_head = nn.Linear(self.d_model, 1)
+
+        # A head for difficulty classification (predicting logits for each class)
+        self.difficulty_head = nn.Linear(self.d_model, num_difficulty_classes)
+
+    def forward(self, src, tgt):
+        """
+        Forward pass that returns a dictionary of outputs for each task.
+        """
+        # 1. Get the base features from the standard transformer layers
+        base_output = self.forward_features(src, tgt)
+
+        # 2. Refine features with pattern memory
+        pattern_context, _ = self.pattern_attention(
+            query=base_output,
+            key=self.pattern_memory.unsqueeze(0).repeat(base_output.size(0), 1, 1),
+            value=self.pattern_memory.unsqueeze(0).repeat(base_output.size(0), 1, 1)
+        )
+        refined_output = base_output + pattern_context
+
+        # 3. Main task: Project features to vocabulary space for token prediction
+        token_logits = self.fc_out(refined_output)
+
+        # 4. Auxiliary tasks: Use a pooled representation of the features.
+        # We take the mean of the features across the sequence length to get a
+        # single vector representing the entire sequence.
+        pooled_output = refined_output.mean(dim=1)
+        tempo_pred = self.tempo_head(pooled_output)
+        difficulty_pred = self.difficulty_head(pooled_output)
+
+        # 5. Return all outputs in a dictionary for flexible loss calculation
+        return {
+            'tokens': token_logits,
+            'tempo': tempo_pred,
+            'difficulty': difficulty_pred
+        }

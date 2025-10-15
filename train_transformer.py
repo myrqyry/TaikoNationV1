@@ -7,8 +7,8 @@ import yaml
 import argparse
 
 from transformer_dataset import get_transformer_data_loaders
-from transformer_model import PatternAwareTransformer # Use the new model
-from tokenization import TaikoTokenizer
+from transformer_model import MultiTaskTaikoTransformer # Use the new multi-task model
+from tokenization import PatternAwareTaikoTokenizer
 import torch.nn.functional as F
 
 def sliding_window_loss(outputs, targets, window_size=4, pad_token_id=0):
@@ -97,16 +97,22 @@ def train_fold(config, fold_idx):
     pad_token_id = tokenizer.vocab["[PAD]"]
 
     # --- Model ---
-    # Use the PatternAwareTransformer
-    model = PatternAwareTransformer(
+    # Use the new MultiTaskTaikoTransformer
+    model = MultiTaskTaikoTransformer(
         vocab_size=vocab_size,
+        num_difficulty_classes=config['training']['multi_task']['num_difficulty_classes'],
         **config['model']
     ).to(device)
     wandb.watch(model, log="all")
 
     # --- Training Components ---
-    # Standard cross-entropy loss for token prediction
-    ce_criterion = nn.CrossEntropyLoss(ignore_index=pad_token_id)
+    # Loss for the main token prediction task
+    token_criterion = nn.CrossEntropyLoss(ignore_index=pad_token_id)
+    # Loss for the tempo regression task
+    tempo_criterion = nn.MSELoss()
+    # Loss for the difficulty classification task
+    difficulty_criterion = nn.CrossEntropyLoss()
+
     optimizer = optim.Adam(model.parameters(), lr=config['training']['learning_rate'])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, 'min', **config['training']['scheduler']
@@ -117,97 +123,133 @@ def train_fold(config, fold_idx):
     epochs_no_improve = 0
     early_stopping_patience = config['training']['early_stopping']['patience']
     min_delta = config['training']['early_stopping']['min_delta']
-    pattern_loss_config = config['training']['pattern_loss']
-    window_size = pattern_loss_config['window_size']
-    pattern_weight = pattern_loss_config['loss_weight']
 
+    # Get loss weights from config
+    pattern_cfg = config['training']['pattern_loss']
+    mt_cfg = config['training']['multi_task']
+    p_weight = pattern_cfg['loss_weight']
+    tempo_weight = mt_cfg['tempo_loss_weight']
+    diff_weight = mt_cfg['difficulty_loss_weight']
 
     model_save_path = f"{config['training']['save_path']}_fold_{fold_idx + 1}.pth"
     os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
 
     for epoch in range(config['training']['num_epochs']):
         model.train()
-        running_loss, running_ce_loss, running_p_loss = 0.0, 0.0, 0.0
+        # Initialize running losses for all components
+        losses = {'total': 0.0, 'token': 0.0, 'pattern': 0.0, 'tempo': 0.0, 'difficulty': 0.0}
+
         for i, batch in enumerate(train_loader):
             if batch is None: continue
 
+            # Move all parts of the batch to the device
             encoder_input = batch["encoder_input"].to(device)
             decoder_input = batch["decoder_input"].to(device)
-            target = batch["target"].to(device)
+            token_target = batch["target"].to(device)
+            difficulty_target = batch["difficulty_target"].to(device)
+            tempo_target = batch["tempo_target"].to(device)
 
             optimizer.zero_grad()
-            output = model(src=encoder_input, tgt=decoder_input)
+            predictions = model(src=encoder_input, tgt=decoder_input)
 
-            # --- Calculate Combined Loss ---
-            ce_loss = ce_criterion(output.view(-1, vocab_size), target.view(-1))
+            # --- Calculate Combined Multi-Task Loss ---
+            token_loss = token_criterion(predictions['tokens'].view(-1, vocab_size), token_target.view(-1))
             pattern_loss = sliding_window_loss(
-                output, target,
-                window_size=window_size,
+                predictions['tokens'], token_target,
+                window_size=pattern_cfg['window_size'],
                 pad_token_id=pad_token_id
             )
-            total_loss = ce_loss + pattern_weight * pattern_loss
+            tempo_loss = tempo_criterion(predictions['tempo'], tempo_target)
+            difficulty_loss = difficulty_criterion(predictions['difficulty'], difficulty_target)
+
+            total_loss = (token_loss +
+                          p_weight * pattern_loss +
+                          tempo_weight * tempo_loss +
+                          diff_weight * difficulty_loss)
 
             total_loss.backward()
             optimizer.step()
 
             # --- Logging ---
-            running_loss += total_loss.item()
-            running_ce_loss += ce_loss.item()
-            running_p_loss += pattern_loss.item()
+            losses['total'] += total_loss.item()
+            losses['token'] += token_loss.item()
+            losses['pattern'] += pattern_loss.item()
+            losses['tempo'] += tempo_loss.item()
+            losses['difficulty'] += difficulty_loss.item()
+
 
             if i % 50 == 49:
-                batch_loss = running_loss / 50
-                batch_ce_loss = running_ce_loss / 50
-                batch_p_loss = running_p_loss / 50
-                print(f"[Fold {fold_idx+1}, Epoch {epoch+1}, Batch {i+1}] total_loss: {batch_loss:.4f} (CE: {batch_ce_loss:.4f}, Pattern: {batch_p_loss:.4f})")
+                # Average losses over the logging interval
+                for key in losses: losses[key] /= 50
+                print(f"[Fold {fold_idx+1}, E {epoch+1}, B {i+1}] Loss: {losses['total']:.4f} "
+                      f"(Tok: {losses['token']:.4f}, Pat: {losses['pattern']:.4f}, "
+                      f"Tem: {losses['tempo']:.4f}, Diff: {losses['difficulty']:.4f})")
                 wandb.log({
-                    "train_loss": batch_loss,
-                    "train_ce_loss": batch_ce_loss,
-                    "train_pattern_loss": batch_p_loss,
+                    "train_loss_total": losses['total'],
+                    "train_loss_token": losses['token'],
+                    "train_loss_pattern": losses['pattern'],
+                    "train_loss_tempo": losses['tempo'],
+                    "train_loss_difficulty": losses['difficulty'],
                     "epoch": epoch
                 })
-                running_loss, running_ce_loss, running_p_loss = 0.0, 0.0, 0.0
+                # Reset running losses
+                losses = {k: 0.0 for k in losses}
 
 
         # --- Validation ---
         model.eval()
-        val_loss, val_ce_loss, val_p_loss = 0.0, 0.0, 0.0
+        val_losses = {'total': 0.0, 'token': 0.0, 'pattern': 0.0, 'tempo': 0.0, 'difficulty': 0.0}
         with torch.no_grad():
             for batch in val_loader:
                 if batch is None: continue
 
                 encoder_input = batch["encoder_input"].to(device)
                 decoder_input = batch["decoder_input"].to(device)
-                target = batch["target"].to(device)
+                token_target = batch["target"].to(device)
+                difficulty_target = batch["difficulty_target"].to(device)
+                tempo_target = batch["tempo_target"].to(device)
 
-                output = model(src=encoder_input, tgt=decoder_input)
+                predictions = model(src=encoder_input, tgt=decoder_input)
 
                 # --- Calculate Combined Validation Loss ---
-                ce_loss = ce_criterion(output.view(-1, vocab_size), target.view(-1))
+                token_loss = token_criterion(predictions['tokens'].view(-1, vocab_size), token_target.view(-1))
                 pattern_loss = sliding_window_loss(
-                    output, target,
-                    window_size=window_size,
+                    predictions['tokens'], token_target,
+                    window_size=pattern_cfg['window_size'],
                     pad_token_id=pad_token_id
                 )
-                total_loss = ce_loss + pattern_weight * pattern_loss
+                tempo_loss = tempo_criterion(predictions['tempo'], tempo_target)
+                difficulty_loss = difficulty_criterion(predictions['difficulty'], difficulty_target)
 
-                val_loss += total_loss.item()
-                val_ce_loss += ce_loss.item()
-                val_p_loss += pattern_loss.item()
+                total_loss = (token_loss +
+                              p_weight * pattern_loss +
+                              tempo_weight * tempo_loss +
+                              diff_weight * difficulty_loss)
+
+                val_losses['total'] += total_loss.item()
+                val_losses['token'] += token_loss.item()
+                val_losses['pattern'] += pattern_loss.item()
+                val_losses['tempo'] += tempo_loss.item()
+                val_losses['difficulty'] += difficulty_loss.item()
 
         # Average the losses over the number of validation batches
-        val_loss /= len(val_loader)
-        val_ce_loss /= len(val_loader)
-        val_p_loss /= len(val_loader)
+        for key in val_losses: val_losses[key] /= len(val_loader)
 
-        print(f"[Fold {fold_idx+1}, Epoch {epoch+1}] val_loss: {val_loss:.4f} (CE: {val_ce_loss:.4f}, Pattern: {val_p_loss:.4f})")
+        print(f"[Fold {fold_idx+1}, E {epoch+1}] Val Loss: {val_losses['total']:.4f} "
+              f"(Tok: {val_losses['token']:.4f}, Pat: {val_losses['pattern']:.4f}, "
+              f"Tem: {val_losses['tempo']:.4f}, Diff: {val_losses['difficulty']:.4f})")
         wandb.log({
-            "val_loss": val_loss,
-            "val_ce_loss": val_ce_loss,
-            "val_pattern_loss": val_p_loss,
+            "val_loss_total": val_losses['total'],
+            "val_loss_token": val_losses['token'],
+            "val_loss_pattern": val_losses['pattern'],
+            "val_loss_tempo": val_losses['tempo'],
+            "val_loss_difficulty": val_losses['difficulty'],
             "epoch": epoch,
             "lr": optimizer.param_groups[0]['lr']
         })
+
+        # Use the total validation loss for scheduling and early stopping
+        val_loss = val_losses['total']
 
         scheduler.step(val_loss)
 
