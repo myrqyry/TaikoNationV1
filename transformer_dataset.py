@@ -17,10 +17,10 @@ class TaikoTransformerDataset(Dataset):
     It loads song-chart pairs, processes them into aligned audio features and
     token sequences, and prepares them for training a sequence-to-sequence model.
     """
-    def __init__(self, is_train=True, max_sequence_length=512):
+    def __init__(self, is_train=True, max_sequence_length=512, time_quantization_ms=100, source_resolution_ms=23.2):
         self.is_train = is_train
         self.max_sequence_length = max_sequence_length
-        self.tokenizer = TaikoTokenizer()
+        self.tokenizer = TaikoTokenizer(time_quantization=time_quantization_ms, source_resolution=source_resolution_ms)
         self.samples = self._prepare_sample_map()
 
     def _prepare_sample_map(self):
@@ -126,10 +126,20 @@ def collate_fn(batch):
     return torch.utils.data.dataloader.default_collate(batch)
 
 
-def get_transformer_data_loaders(batch_size=16, max_sequence_length=512):
+def get_transformer_data_loaders(batch_size=16, max_sequence_length=512, time_quantization_ms=100, source_resolution_ms=23.2):
     """Returns training and testing DataLoaders for the transformer."""
-    train_dataset = TaikoTransformerDataset(is_train=True, max_sequence_length=max_sequence_length)
-    test_dataset = TaikoTransformerDataset(is_train=False, max_sequence_length=max_sequence_length)
+    train_dataset = TaikoTransformerDataset(
+        is_train=True,
+        max_sequence_length=max_sequence_length,
+        time_quantization_ms=time_quantization_ms,
+        source_resolution_ms=source_resolution_ms
+    )
+    test_dataset = TaikoTransformerDataset(
+        is_train=False,
+        max_sequence_length=max_sequence_length,
+        time_quantization_ms=time_quantization_ms,
+        source_resolution_ms=source_resolution_ms
+    )
 
     train_loader = DataLoader(
         train_dataset,
@@ -145,4 +155,5 @@ def get_transformer_data_loaders(batch_size=16, max_sequence_length=512):
         num_workers=2,
         collate_fn=collate_fn
     )
-    return train_loader, test_loader
+    # Return the tokenizer from one of the datasets (they are identical)
+    return train_loader, test_loader, train_dataset.tokenizer
