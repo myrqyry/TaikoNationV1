@@ -1,22 +1,18 @@
 import collections
+import numpy as np
 
 class PatternEvaluator:
     def _get_ngrams(self, tokens, n):
         """Helper function to extract n-grams from a sequence of tokens."""
+        if len(tokens) < n:
+            return collections.Counter()
         return collections.Counter(zip(*[tokens[i:] for i in range(n)]))
 
     def calculate_pattern_overlap(self, generated_tokens, human_patterns, n=3):
         """
         Measure human-like patterning by calculating the overlap of n-grams
         between the generated sequence and a set of human-created patterns.
-
-        Args:
-            generated_tokens (list): A list of token IDs from the model.
-            human_patterns (list of lists): A list of human-created token sequences.
-            n (int): The size of the n-grams to use for comparison.
-
-        Returns:
-            float: The Jaccard similarity between the generated and human n-gram sets.
+        Uses Jaccard similarity.
         """
         if not generated_tokens or not human_patterns:
             return 0.0
@@ -29,22 +25,16 @@ class PatternEvaluator:
         if not generated_ngrams or not human_ngrams:
             return 0.0
 
-        intersection = generated_ngrams & human_ngrams
-        union = generated_ngrams | human_ngrams
+        intersection = generated_ngrams.keys() & human_ngrams.keys()
+        union = generated_ngrams.keys() | human_ngrams.keys()
 
-        return sum(intersection.values()) / sum(union.values()) if sum(union.values()) > 0 else 0.0
+        return len(intersection) / len(union) if len(union) > 0 else 0.0
 
     def calculate_pattern_space_coverage(self, token_sequence, n=3):
         """
         Measure the variety of unique patterns used in a sequence by calculating
-        the ratio of unique n-grams to the total number of n-grams.
-
-        Args:
-            token_sequence (list): A list of token IDs.
-            n (int): The size of the n-grams to use.
-
-        Returns:
-            float: The ratio of unique n-grams to total n-grams.
+        the ratio of unique n-grams to the total number of possible n-grams of that length.
+        This is a measure of diversity.
         """
         if not token_sequence or len(token_sequence) < n:
             return 0.0
@@ -55,14 +45,35 @@ class PatternEvaluator:
 
         return unique_ngrams / total_ngrams if total_ngrams > 0 else 0.0
 
-    def evaluate_denden_sequences(self, tokens):
+    def evaluate_denden_sequences(self, tokens, tokenizer):
         """
-        Specific evaluation for 'denden' (roll) patterns. This is a placeholder
-        and would need a more detailed implementation based on the paper's
-        specific definition of denden patterns.
+        Specific evaluation for 'denden' (roll) patterns.
+        This implementation identifies sequences of roll tokens.
         """
-        # This would require a specific definition of what constitutes a "denden" pattern.
-        # For now, we'll just count the occurrences of a hypothetical roll token.
-        # In a real implementation, this would involve looking for specific sequences of Don/Ka notes.
-        denden_token = -1 # Placeholder for a denden token ID
-        return tokens.count(denden_token)
+        roll_start_token = tokenizer.vocab.get("roll_start")
+        roll_end_token = tokenizer.vocab.get("roll_end")
+
+        if roll_start_token is None or roll_end_token is None:
+            return {"count": 0, "avg_length": 0}
+
+        in_roll = False
+        roll_count = 0
+        roll_lengths = []
+        current_length = 0
+
+        for token in tokens:
+            if token == roll_start_token:
+                if not in_roll:
+                    in_roll = True
+                    roll_count += 1
+                current_length += 1
+            elif token == roll_end_token:
+                if in_roll:
+                    in_roll = False
+                    roll_lengths.append(current_length)
+                    current_length = 0
+            elif in_roll:
+                current_length += 1
+
+        avg_length = np.mean(roll_lengths) if roll_lengths else 0
+        return {"count": roll_count, "avg_length": avg_length}
