@@ -38,5 +38,10 @@ training:
   # Cross-validation settings
   k_folds: 5
 
+  # Pattern-aware loss settings
+  pattern_loss:
+    window_size: 8   # The size of the sliding window for pattern evaluation
+    loss_weight: 0.1 # The weight to apply to the pattern loss component
+
 # --- Development Settings ---
 dry_run: false # Set to true to run a quick test with one fold and fewer batches

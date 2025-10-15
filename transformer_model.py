@@ -60,39 +60,75 @@ class TaikoTransformer(nn.Module):
         mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
         return mask
 
-    def forward(self, src, tgt):
+    def forward_features(self, src, tgt):
         """
-        Forward pass of the model.
-
-        Args:
-            src (torch.Tensor): The audio features (encoder input).
-                                Shape: [batch_size, seq_len, audio_feature_size]
-            tgt (torch.Tensor): The note tokens (decoder input).
-                                Shape: [batch_size, seq_len]
-
-        Returns:
-            torch.Tensor: The output logits over the vocabulary.
-                          Shape: [batch_size, seq_len, vocab_size]
+        Processes inputs through the transformer encoder-decoder stack,
+        returning the raw feature output before the final projection.
         """
         # --- Prepare Inputs ---
-        # Project audio features to the model dimension
         src = self.audio_input_projection(src) * math.sqrt(self.d_model)
         src = self.pos_encoder(src)
 
-        # Embed and positionally encode the target tokens
-        tgt = self.token_embedding(tgt) * math.sqrt(self.d_model)
-        tgt = self.pos_encoder(tgt)
+        tgt_emb = self.token_embedding(tgt) * math.sqrt(self.d_model)
+        tgt_emb = self.pos_encoder(tgt_emb)
 
         # --- Create Masks ---
-        # The decoder needs a causal mask to prevent it from seeing future tokens.
         tgt_mask = self._generate_square_subsequent_mask(tgt.size(1)).to(src.device)
 
-        # The encoder and decoder also need padding masks if we were to support variable length sequences.
-        # For now, since our dataset pads everything to max_sequence_length, we can omit them for simplicity.
-        # src_key_padding_mask and tgt_key_padding_mask would go here.
-
         # --- Transformer Pass ---
-        output = self.transformer(src, tgt, tgt_mask=tgt_mask)
+        output = self.transformer(src, tgt_emb, tgt_mask=tgt_mask)
+        return output
 
-        # --- Final Output ---
-        return self.fc_out(output)
+    def forward(self, src, tgt):
+        """
+        Full forward pass including the final output projection.
+        """
+        features = self.forward_features(src, tgt)
+        return self.fc_out(features)
+
+
+class PatternAwareTransformer(TaikoTransformer):
+    """
+    Enhanced transformer with an explicit pattern memory module. It refines
+    the standard transformer's output by attending to a learned set of
+    meaningful musical patterns.
+    """
+    def __init__(self, *args, **kwargs):
+        # Pop 'num_heads' from kwargs for pattern_attention, if it exists,
+        # or default to 8. This avoids passing it to TaikoTransformer's __init__.
+        num_heads = kwargs.pop('nhead', 8)
+        super().__init__(*args, **kwargs)
+
+        # --- Pattern Modeling Components ---
+        # A learnable memory bank of common patterns
+        self.pattern_memory = nn.Parameter(torch.randn(512, self.d_model))
+
+        # Attention mechanism to query the pattern memory
+        self.pattern_attention = nn.MultiheadAttention(
+            self.d_model,
+            num_heads=num_heads,
+            dropout=0.1,
+            batch_first=True
+        )
+
+    def forward(self, src, tgt):
+        """
+        Forward pass that incorporates the pattern-aware refinement step.
+        """
+        # 1. Get the base features from the standard transformer layers
+        base_output = self.forward_features(src, tgt)
+
+        # 2. Refine features with pattern memory
+        # Query: The transformer's output (what the model is currently thinking)
+        # Key/Value: The learnable pattern memory (the library of patterns)
+        pattern_context, _ = self.pattern_attention(
+            query=base_output,
+            key=self.pattern_memory.unsqueeze(0).repeat(base_output.size(0), 1, 1),
+            value=self.pattern_memory.unsqueeze(0).repeat(base_output.size(0), 1, 1)
+        )
+
+        # 3. Add the pattern context back to the base output
+        refined_output = base_output + pattern_context
+
+        # 4. Project the refined features to the vocabulary space
+        return self.fc_out(refined_output)
