@@ -1,0 +1,36 @@
+# Default configuration for the Taiko Transformer model
+
+model:
+  d_model: 256
+  nhead: 8
+  num_encoder_layers: 6
+  num_decoder_layers: 6
+  dim_feedforward: 1024
+  dropout: 0.1
+  audio_feature_size: 80 # Determined by the pre-computed .npy files
+
+data:
+  max_sequence_length: 512
+  # The tokenizer and audio processing must be aligned.
+  # We use 100ms as the quantization step.
+  time_quantization_ms: 100
+  # The resolution of the source data, used for framing.
+  source_resolution_ms: 23.2
+
+training:
+  learning_rate: 0.0001
+  batch_size: 8
+  num_epochs: 50 # Increased from 25 for more robust training
+  save_path: "output/taiko_transformer.pth"
+
+  # --- New Infrastructure Settings ---
+  # Learning rate scheduler settings (ReduceLROnPlateau)
+  scheduler:
+    patience: 3      # How many epochs to wait for improvement
+    factor: 0.5        # Factor by which to reduce the learning rate
+    min_lr: 0.000001   # Minimum learning rate
+
+  # Early stopping settings
+  early_stopping:
+    patience: 7      # How many epochs to wait for improvement before stopping
+    min_delta: 0.001   # Minimum change in validation loss to be considered an improvement

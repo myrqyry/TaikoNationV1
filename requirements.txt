@@ -6,3 +6,4 @@ wandb
 numpy
 tflearn
 tensorflow
+PyYAML>=5.0
