@@ -34,3 +34,9 @@ training:
   early_stopping:
     patience: 7      # How many epochs to wait for improvement before stopping
     min_delta: 0.001   # Minimum change in validation loss to be considered an improvement
+
+  # Cross-validation settings
+  k_folds: 5
+
+# --- Development Settings ---
+dry_run: false # Set to true to run a quick test with one fold and fewer batches
