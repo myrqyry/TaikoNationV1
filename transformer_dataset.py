@@ -4,7 +4,7 @@ import numpy as np
 import re
 from torch.utils.data import Dataset, DataLoader
 
-from tokenization import TaikoTokenizer
+from tokenization import PatternAwareTaikoTokenizer
 from audio_processing import get_audio_features, augment_spectrogram
 
 # --- Constants ---
@@ -23,11 +23,20 @@ class TaikoTransformerDataset(Dataset):
     def __init__(self, all_samples, indices, is_train=True, max_sequence_length=512, time_quantization_ms=100, source_resolution_ms=23.2):
         self.is_train = is_train
         self.max_sequence_length = max_sequence_length
-        self.tokenizer = TaikoTokenizer(time_quantization=time_quantization_ms, source_resolution=source_resolution_ms)
+        self.tokenizer = PatternAwareTaikoTokenizer(time_quantization=time_quantization_ms, source_resolution=source_resolution_ms)
         self.samples = [all_samples[i] for i in indices]
         # Store for use in __getitem__
         self.source_resolution_ms = source_resolution_ms
         self.time_quantization_ms = time_quantization_ms
+
+        # --- Difficulty Mapping for Multi-Task Learning ---
+        # Maps common difficulty names to integer classes.
+        self.difficulty_map = {
+            'easy': 0, 'normal': 1, 'hard': 2, 'oni': 3, 'ura': 4,
+            'kantan': 0, 'futsuu': 1, 'muzukashii': 2, 'uraoni': 4,
+            # Add common variations
+            'inneroni': 4, 'expert': 3
+        }
 
     def __len__(self):
         return len(self.samples)
@@ -91,10 +100,27 @@ class TaikoTransformerDataset(Dataset):
         # Target is the original token sequence
         target = torch.tensor(token_ids, dtype=torch.long)
 
+        # 4. Prepare targets for multi-task learning
+        difficulty_str = sample.get("difficulty", "unknown").lower()
+        # Find the base difficulty name in the map, default to class 3 (Oni) if not found
+        difficulty_class = 3 # Default to 'oni'
+        for key, value in self.difficulty_map.items():
+            if key in difficulty_str:
+                difficulty_class = value
+                break
+
+        # NOTE: Tempo data is not available in the current dataset.
+        # We use a placeholder value (e.g., 120 BPM).
+        # A real implementation would load this from the chart or audio.
+        tempo_target = torch.tensor([120.0], dtype=torch.float)
+
+
         return {
             "encoder_input": encoder_input,
             "decoder_input": decoder_input,
-            "target": target
+            "target": target,
+            "difficulty_target": torch.tensor(difficulty_class, dtype=torch.long),
+            "tempo_target": tempo_target
         }
 
     def _get_dummy_item(self):

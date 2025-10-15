@@ -43,5 +43,11 @@ training:
     window_size: 8   # The size of the sliding window for pattern evaluation
     loss_weight: 0.1 # The weight to apply to the pattern loss component
 
+  # Multi-task learning settings
+  multi_task:
+    num_difficulty_classes: 5
+    tempo_loss_weight: 0.05
+    difficulty_loss_weight: 0.2
+
 # --- Development Settings ---
 dry_run: false # Set to true to run a quick test with one fold and fewer batches
