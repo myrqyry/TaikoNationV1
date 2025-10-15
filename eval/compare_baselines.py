@@ -16,7 +16,7 @@ from eval.pattern_evaluation import PatternEvaluator
 def load_model(model_path, config, tokenizer, device):
     """Loads a trained PatternAwareTransformer model from a .pth file."""
     print("Loading model...")
-    model_config = config['model']
+    model_config = config['model'].copy()
     model_config.pop('vocab_size', None)
 
     model = PatternAwareTransformer(
