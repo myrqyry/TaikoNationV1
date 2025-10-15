@@ -67,32 +67,48 @@ def _package_data(song_data, note_data, training):
     """Packages the song and note data into training and testing sets."""
     trainX, trainY, testX, testY = [], [], [], []
 
-    for j in range(len(song_data)):
+    # Package up the last 16 blocks of data
+    for h in range(SONG_CHUNK_SIZE):
         song_input, note_input, output_chunk = [], [], []
         for k in range(SONG_CHUNK_SIZE):
-            is_padding = j - k < 0
-
-            # Song input
-            if is_padding:
+            if h - k < 0:
                 song_input.append(np.zeros([SONG_VECTOR_SIZE]))
-            else:
-                song_input.append(song_data[j - k])
-
-            # Note input
-            if k < NOTE_CHUNK_SIZE:
-                if is_padding:
+                if k < NOTE_CHUNK_SIZE:
                     note_input.append(np.zeros([NOTE_VECTOR_SIZE]))
-                else:
-                    note_input.append(note_data[j - k])
+                elif k != 15:
+                    note_input.append(np.ones([NOTE_VECTOR_SIZE]))
+                if k > 11:
+                    output_chunk.append(np.zeros([NOTE_VECTOR_SIZE]))
+            else:
+                song_input.append(song_data[h-k])
+                if k < NOTE_CHUNK_SIZE:
+                    note_input.append(note_data[h-k])
+                elif k != 15:
+                    note_input.append(np.ones([NOTE_VECTOR_SIZE]))
+                if k > 11:
+                    output_chunk.append(note_data[h-k])
+
+        input_chunk = np.concatenate([np.array(song_input).flatten(), np.array(note_input).flatten()])
+        output_chunk = np.reshape(np.concatenate(output_chunk), [4, NOTE_VECTOR_SIZE])
+
+        if training:
+            trainX.append(input_chunk)
+            trainY.append(output_chunk)
+        else:
+            testX.append(input_chunk)
+            testY.append(output_chunk)
+
+    # Package up the rest of the data
+    for j in range(SONG_CHUNK_SIZE, len(song_data)):
+        song_input, note_input, output_chunk = [], [], []
+        for k in range(SONG_CHUNK_SIZE):
+            song_input.append(song_data[j-k])
+            if k < NOTE_CHUNK_SIZE:
+                note_input.append(note_data[j-k])
             elif k != 15:
                 note_input.append(np.ones([NOTE_VECTOR_SIZE]))
-
-            # Output chunk
             if k > 11:
-                if is_padding:
-                    output_chunk.append(np.zeros([NOTE_VECTOR_SIZE]))
-                else:
-                    output_chunk.append(note_data[j - k])
+                output_chunk.append(note_data[j-k])
 
         input_chunk = np.concatenate([np.array(song_input).flatten(), np.array(note_input).flatten()])
         output_chunk = np.reshape(np.concatenate(output_chunk), [4, NOTE_VECTOR_SIZE])
@@ -110,44 +126,29 @@ def preprocess():
     '''
     This function preprocesses the dataset for use in the model.
     '''
-    try:
-        charts = os.listdir(path=INPUT_CHART_DIR)
-        songs = os.listdir(path=INPUT_SONG_DIR)
-    except FileNotFoundError as e:
-        print(f"Error: Input directory not found - {e}. Please ensure '{INPUT_CHART_DIR}' and '{INPUT_SONG_DIR}' exist.")
-        return [], [], [], []
+    charts = os.listdir(path=INPUT_CHART_DIR)
+    songs = os.listdir(path=INPUT_SONG_DIR)
 
     trainX, trainY, testX, testY = [], [], [], []
-
-    song_map = {s.split()[0]: s for s in songs}
 
     for i, chart in enumerate(charts):
         is_training = i not in TEST_DATA_INDICES
 
-        try:
-            id_number = chart.split("_")[0]
-            if id_number not in song_map:
-                print(f"Warning: No matching song found for chart {chart}. Skipping.")
-                continue
-            song_name = song_map[id_number]
-        except IndexError:
-            print(f"Warning: Could not parse ID from chart file {chart}. Skipping.")
+        id_number = chart.split("_")[0]
+        song_name = next((s for s in songs if s.split()[0] == id_number), None)
+
+        if not song_name:
+            print(f"Warning: No matching song found for chart {chart}")
             continue
 
-        print(f"Processing: {song_name}, {chart}")
+        print(song_name, chart)
 
         song_data = _load_song_data(os.path.join(INPUT_SONG_DIR, song_name))
-        if song_data is None or song_data.shape[1] != SONG_VECTOR_SIZE:
-            print(f"Warning: Corrupted or invalid shape for song data {song_name}. Skipping.")
+        if song_data is None:
             continue
 
         note_data = _load_note_data(os.path.join(INPUT_CHART_DIR, chart), len(song_data))
-        if note_data is None or note_data.shape[1] != NOTE_VECTOR_SIZE:
-            print(f"Warning: Corrupted or invalid shape for note data {chart}. Skipping.")
-            continue
-
-        if len(song_data) == 0:
-            print(f"Warning: Empty song data for {song_name}. Skipping.")
+        if note_data is None:
             continue
 
         packaged_data = _package_data(song_data, note_data, is_training)
@@ -158,9 +159,6 @@ def preprocess():
 
     print(f"{len(trainX)} train X, {len(trainY)} train Y")
     print(f"{len(testX)} test X, {len(testY)} test Y")
-
-    if not trainX or not testX:
-        print("Error: No data was successfully processed. Please check your input files and directories.")
 
     return trainX, trainY, testX, testY
 
@@ -215,7 +213,7 @@ def main():
     model = build_model()
 
     try:
-        model.load("model_rt.tfl")
+        model.load("model.tfl")
     except Exception as e:
         print(f"No saved model found. Starting training from scratch. Error: {e}")
 
