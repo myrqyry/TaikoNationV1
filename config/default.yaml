@@ -45,5 +45,9 @@ training:
     pattern_frequency_file: "output/pattern_frequencies.json"
     weight_intensity: 0.5
 
+patterns:
+  frequency_file: "output/pattern_frequencies.json"
+  top_n_patterns_per_length: 20
+
 # --- Development Settings ---
 dry_run: false # Set to true to run a quick test with one fold and fewer batches
