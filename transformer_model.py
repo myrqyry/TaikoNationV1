@@ -105,15 +105,32 @@ class PatternAwareTransformer(TaikoTransformer):
             batch_first=True
         )
 
-    def forward(self, src, tgt):
+    def forward(self, src, tgt, return_attention=False):
         """
         Forward pass that incorporates the pattern-aware refinement step.
+
+        Args:
+            src (torch.Tensor): The source audio features.
+            tgt (torch.Tensor): The target token sequence.
+            return_attention (bool): If True, returns attention weights alongside the output.
+
+        Returns:
+            torch.Tensor or (torch.Tensor, torch.Tensor): The output logits, and optionally
+                                                          the pattern attention weights.
         """
         base_output = self.forward_features(src, tgt)
-        pattern_context, _ = self.pattern_attention(
+
+        # The key difference is capturing the attention weights (attn_weights)
+        pattern_context, attn_weights = self.pattern_attention(
             query=base_output,
             key=self.pattern_memory.unsqueeze(0).repeat(base_output.size(0), 1, 1),
             value=self.pattern_memory.unsqueeze(0).repeat(base_output.size(0), 1, 1)
         )
+
         refined_output = base_output + pattern_context
-        return self.fc_out(refined_output)
+        output_logits = self.fc_out(refined_output)
+
+        if return_attention:
+            return output_logits, attn_weights
+        else:
+            return output_logits

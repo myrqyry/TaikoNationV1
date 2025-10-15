@@ -21,6 +21,7 @@ class TaikoChartGenerator:
     def __init__(self, model_path, config_path='config/default.yaml'):
         print("--- Initializing Taiko Chart Generator ---")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.last_attention_weights = None # To store attention weights
 
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
@@ -84,6 +85,7 @@ class TaikoChartGenerator:
         # Initialize generation
         cls_token_id = self.tokenizer.vocab["[CLS]"]
         generated_tokens = [cls_token_id]
+        all_attn_weights = []
 
         print("Generating chart tokens...")
         # Autoregressive generation loop with progress bar
@@ -94,7 +96,12 @@ class TaikoChartGenerator:
 
             decoder_input = torch.tensor([generated_tokens], dtype=torch.long).to(self.device)
             with torch.no_grad():
-                token_logits = self.model(encoder_input, decoder_input)
+                token_logits, attn_weights = self.model(encoder_input, decoder_input, return_attention=True)
+
+            # Pad the attention weights to the max sequence length
+            attn_weights_padded = np.zeros((attn_weights.shape[0], self.config['data']['max_sequence_length'], attn_weights.shape[2]))
+            attn_weights_padded[:, :attn_weights.shape[1], :] = attn_weights.cpu().numpy()
+            all_attn_weights.append(attn_weights_padded)
 
             next_token_id = token_logits.argmax(dim=-1)[:, -1].item()
 
@@ -103,6 +110,10 @@ class TaikoChartGenerator:
                 break
 
             generated_tokens.append(next_token_id)
+
+        # Store the collected attention weights
+        if all_attn_weights:
+            self.last_attention_weights = np.array(all_attn_weights)
 
         print(f"Generated a total of {len(generated_tokens) - 1} tokens.")
         return generated_tokens[1:] # Exclude the initial [CLS] token
@@ -155,12 +166,11 @@ class TaikoChartGenerator:
         note_map = {
             "don": "1", "ka": "2", "big_don": "3", "big_ka": "4",
             "roll_start": "5", "roll_end": "8", "finisher": "7"
-            # NOTE: "roll_cont" is not a standard TJA event, so we treat it as part of a roll.
         }
 
         chart_data = []
         notes_in_measure = 0
-        beats_per_measure = 4 * 4 # Assuming 4/4 time signature, 16th notes
+        beats_per_measure = 4 * 4
 
         detokenized = self.tokenizer.detokenize(tokens)
         for token_str in detokenized:
@@ -168,7 +178,6 @@ class TaikoChartGenerator:
                 chart_data.append("0")
             else:
                 events = token_str.split(',')
-                # For simplicity, we take the first valid event in a token
                 note = "0"
                 for event in events:
                     if event in note_map:
@@ -206,17 +215,14 @@ def main():
 
     print("--- Taiko Chart Generator CLI ---")
 
-    # Initialize the generator
     generator = TaikoChartGenerator(args.model_path, args.config)
 
-    # Generate tokens
     tokens = generator.generate_from_audio(args.audio_path)
 
     if not tokens:
         print("Chart generation failed.")
         return
 
-    # Export to the desired format
     if args.format == 'osu':
         generator.export_to_osu(tokens, args.output_path)
     elif args.format == 'tja':

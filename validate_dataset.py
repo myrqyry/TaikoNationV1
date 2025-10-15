@@ -75,22 +75,8 @@ def validate_dataset():
     # --- Check 3: Difficulty Name Parsing ---
     print("Validating difficulty name parsing...")
     for chart_filename in chart_files:
-        basename = os.path.splitext(chart_filename)[0]
-        difficulty_found = False
-
-        # Priority 1: Match bracketed difficulty, e.g., "[oni]"
-        if re.search(r'\[([^\]]+)\]$', basename):
-            difficulty_found = True
-        else:
-            # Priority 2: Match text after the final underscore
-            last_underscore_pos = basename.rfind('_')
-            if last_underscore_pos != -1:
-                potential_difficulty = basename[last_underscore_pos + 1:]
-                # Heuristic: Accommodate longer difficulty names, especially for custom charts.
-                if 0 < len(potential_difficulty) <= 40:
-                    difficulty_found = True
-
-        if not difficulty_found:
+        difficulty_match = re.search(r'\[(.*?)\]', chart_filename)
+        if not difficulty_match:
             issues.append(f"NamingWarning: Chart '{chart_filename}' has no difficulty in its name (e.g., [oni]).")
 
     # --- Write Report ---
