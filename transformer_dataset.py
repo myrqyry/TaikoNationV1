@@ -126,9 +126,22 @@ def get_transformer_data_loaders(config, fold_idx=0):
             try:
                 id_number = chart_filename.split("_")[0]
                 if id_number in song_map:
-                    # Parse difficulty from filename, e.g., "... [oni].npy"
-                    difficulty_match = re.search(r'\[(.*?)\]', chart_filename)
-                    difficulty = difficulty_match.group(1) if difficulty_match else "unknown"
+                    # --- Improved Difficulty Parsing ---
+                    basename = os.path.splitext(chart_filename)[0]
+                    difficulty = "unknown"  # Default value
+
+                    # Priority 1: Match bracketed difficulty at the end, e.g., "[oni]"
+                    bracket_match = re.search(r'\[([^\]]+)\]$', basename)
+                    if bracket_match:
+                        difficulty = bracket_match.group(1)
+                    else:
+                        # Priority 2: Match text after the final underscore
+                        last_underscore_pos = basename.rfind('_')
+                        if last_underscore_pos != -1:
+                            potential_difficulty = basename[last_underscore_pos + 1:]
+                            # Heuristic: Accommodate longer difficulty names, especially for custom charts.
+                            if 0 < len(potential_difficulty) <= 40:
+                                difficulty = potential_difficulty
 
                     all_samples.append({
                         "chart_path": os.path.join(INPUT_CHART_DIR, chart_filename),
