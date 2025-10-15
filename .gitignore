@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+pip-wheel-metadata/
+.eggs/
+*.egg-info/
+*.egg
+
+# Build artifacts
+build/
+dist/
+*.so
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Machine Learning
+*.pth
+*.pt
+*.tfl
+*.h5
+wandb/
+output/
+dummy_*.npy
+dummy_*.wav
+.ipynb_checkpoints/
