@@ -48,3 +48,30 @@ def get_audio_features(audio_path, source_resolution_ms=23.2, frame_duration_ms=
     except Exception as e:
         print(f"Error processing audio feature file {audio_path}: {e}")
         return None
+
+def augment_spectrogram(spectrogram, freq_mask_param=27, time_mask_param=50):
+    """
+    Applies SpecAugment-style masking to a spectrogram.
+
+    Args:
+        spectrogram (np.ndarray): The input spectrogram of shape (time_steps, n_mels).
+        freq_mask_param (int): The maximum width of the frequency mask.
+        time_mask_param (int): The maximum width of the time mask.
+
+    Returns:
+        np.ndarray: The augmented spectrogram.
+    """
+    augmented_spec = spectrogram.copy()
+    num_time_steps, num_mels = augmented_spec.shape
+
+    # --- Frequency Masking ---
+    f = np.random.uniform(low=0.0, high=freq_mask_param)
+    f0 = np.random.randint(0, num_mels - int(f))
+    augmented_spec[:, f0:f0 + int(f)] = 0
+
+    # --- Time Masking ---
+    t = np.random.uniform(low=0.0, high=time_mask_param)
+    t0 = np.random.randint(0, num_time_steps - int(t))
+    augmented_spec[t0:t0 + int(t), :] = 0
+
+    return augmented_spec

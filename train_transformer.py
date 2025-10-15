@@ -15,26 +15,23 @@ def load_config(path="config/default.yaml"):
     with open(path, 'r') as f:
         return yaml.safe_load(f)
 
-def train(config):
+def train_fold(config, fold_idx):
     """
-    Main training loop for the TaikoNation Transformer model.
+    Main training loop for a single fold of cross-validation.
     """
     # --- Setup ---
-    os.environ["WANDB_MODE"] = "offline"
-    wandb.init(project="TaikoNation-Transformer", config=config)
+    run_name = f"fold_{fold_idx + 1}"
+    wandb.init(project="TaikoNation-Transformer", config=config, name=run_name, reinit=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    print(f"--- Starting Fold {fold_idx + 1}/{config['training']['k_folds']} on {device} ---")
 
     # --- Data ---
-    print("Loading data...")
-    # We pass the data config to the data loader function
-    train_loader, test_loader, tokenizer = get_transformer_data_loaders(
-        batch_size=config['training']['batch_size'],
-        max_sequence_length=config['data']['max_sequence_length'],
-        time_quantization_ms=config['data']['time_quantization_ms'],
-        source_resolution_ms=config['data']['source_resolution_ms']
-    )
+    train_loader, val_loader, tokenizer = get_transformer_data_loaders(config, fold_idx)
+    if train_loader is None:
+        print("Failed to create data loaders. Skipping fold.")
+        wandb.finish()
+        return
 
     vocab_size = tokenizer.vocab_size
     pad_token_id = tokenizer.vocab["[PAD]"]
@@ -42,36 +39,25 @@ def train(config):
     # --- Model ---
     model = TaikoTransformer(
         vocab_size=vocab_size,
-        d_model=config['model']['d_model'],
-        nhead=config['model']['nhead'],
-        num_encoder_layers=config['model']['num_encoder_layers'],
-        num_decoder_layers=config['model']['num_decoder_layers'],
-        dim_feedforward=config['model']['dim_feedforward'],
-        dropout=config['model']['dropout'],
-        audio_feature_size=config['model']['audio_feature_size']
+        **config['model'] # Unpack model hyperparameters
     ).to(device)
     wandb.watch(model, log="all")
 
     # --- Training Components ---
     criterion = nn.CrossEntropyLoss(ignore_index=pad_token_id)
     optimizer = optim.Adam(model.parameters(), lr=config['training']['learning_rate'])
-
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        'min',
-        patience=config['training']['scheduler']['patience'],
-        factor=config['training']['scheduler']['factor'],
-        min_lr=config['training']['scheduler']['min_lr']
+        optimizer, 'min', **config['training']['scheduler']
     )
 
-    os.makedirs(os.path.dirname(config['training']['save_path']), exist_ok=True)
-
     # --- Training Loop ---
-    print("Starting training...")
     best_val_loss = float('inf')
     epochs_no_improve = 0
     early_stopping_patience = config['training']['early_stopping']['patience']
     min_delta = config['training']['early_stopping']['min_delta']
+
+    model_save_path = f"{config['training']['save_path']}_fold_{fold_idx + 1}.pth"
+    os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
 
     for epoch in range(config['training']['num_epochs']):
         model.train()
@@ -92,15 +78,16 @@ def train(config):
             running_loss += loss.item()
             if i % 50 == 49:
                 batch_loss = running_loss / 50
-                print(f"[Epoch {epoch + 1}, Batch {i + 1}] training loss: {batch_loss:.4f}")
+                print(f"[Fold {fold_idx+1}, Epoch {epoch+1}, Batch {i+1}] loss: {batch_loss:.4f}")
                 wandb.log({"train_loss": batch_loss, "epoch": epoch})
                 running_loss = 0.0
+
 
         # --- Validation ---
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for batch in test_loader:
+            for batch in val_loader:
                 if batch is None: continue
 
                 encoder_input = batch["encoder_input"].to(device)
@@ -111,30 +98,36 @@ def train(config):
                 loss = criterion(output.view(-1, vocab_size), target.view(-1))
                 val_loss += loss.item()
 
-        val_loss /= len(test_loader)
-        print(f"Epoch {epoch + 1} validation loss: {val_loss:.4f}")
+        val_loss /= len(val_loader)
+        print(f"[Fold {fold_idx+1}, Epoch {epoch+1}] val_loss: {val_loss:.4f}")
         wandb.log({"val_loss": val_loss, "epoch": epoch, "lr": optimizer.param_groups[0]['lr']})
 
-        # Step the scheduler
         scheduler.step(val_loss)
 
         # --- Save Best Model ---
         if val_loss < best_val_loss - min_delta:
             best_val_loss = val_loss
             epochs_no_improve = 0
-            torch.save(model.state_dict(), config['training']['save_path'])
-            print(f"New best model saved to {config['training']['save_path']} with validation loss: {best_val_loss:.4f}")
+            torch.save(model.state_dict(), model_save_path)
+            print(f"New best model for fold {fold_idx+1} saved with val_loss: {best_val_loss:.4f}")
         else:
             epochs_no_improve += 1
-            print(f"No improvement in validation loss for {epochs_no_improve} epochs.")
 
-        # --- Early Stopping Check ---
         if epochs_no_improve >= early_stopping_patience:
-            print(f"Early stopping triggered after {epochs_no_improve} epochs with no improvement.")
+            print(f"Early stopping triggered for fold {fold_idx+1}.")
             break
 
-    print("Finished Training")
+    print(f"--- Finished Fold {fold_idx + 1} ---")
     wandb.finish()
+
+def main(config):
+    os.environ["WANDB_MODE"] = "offline"
+
+    # For a dry run, just test one fold
+    num_folds = 1 if config.get('dry_run', False) else config['training']['k_folds']
+
+    for i in range(num_folds):
+        train_fold(config, i)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train the Taiko Transformer model.")
@@ -145,7 +138,7 @@ if __name__ == "__main__":
     config = load_config(args.config)
 
     try:
-        train(config)
+        main(config)
     except Exception as e:
         print(f"An error occurred during training: {e}")
         if wandb.run:
