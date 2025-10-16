@@ -95,6 +95,18 @@
                 <output class="rating-value">5</output>
             </div>
 
+            <div class="form-group">
+                <label for="pattern_coherence">Pattern Coherence (1-10)</label>
+                <input type="range" id="pattern_coherence" name="pattern_coherence" min="1" max="10" value="5" oninput="this.nextElementSibling.value = this.value">
+                <output class="rating-value">5</output>
+            </div>
+
+            <div class="form-group">
+                <label for="difficulty_accuracy">Difficulty Accuracy (1-10)</label>
+                <input type="range" id="difficulty_accuracy" name="difficulty_accuracy" min="1" max="10" value="5" oninput="this.nextElementSibling.value = this.value">
+                <output class="rating-value">5</output>
+            </div>
+
             <button type="submit">Submit Rating & Get Next Chart</button>
         </form>
     {% else %}
