@@ -119,11 +119,88 @@ class TaikoChartGenerator:
 
     def export_to_osu(self, tokens, output_path, metadata=None):
         """Exports a sequence of tokens to the .osu file format."""
-        pass
+        if metadata is None:
+            metadata = {'Title': 'AI Generated Chart', 'Artist': 'TaikoTransformer', 'Version': 'v1.0'}
+
+        time_per_token = self.config['data']['time_quantization_ms']
+        hit_objects = []
+        current_time = 1000  # Start time for the first note
+
+        for token_str in self.tokenizer.detokenize(tokens):
+            if token_str in ["[PAD]", "[EMPTY]", "[CLS]", "[SEP]"]:
+                current_time += time_per_token
+                continue
+
+            events = token_str.split(',')
+            for event in events:
+                x, y, hitsound, note_type = 128, 192, 0, 1
+                if "big" in event: hitsound += 4
+                if "finisher" in event: hitsound += 8
+                if "ka" in event: hitsound += 2
+                hit_objects.append(f"{x},{y},{current_time},{note_type},{hitsound},0:0:0:0:")
+            current_time += time_per_token
+
+        with open(output_path, 'w') as f:
+            f.write("osu file format v14\n\n[General]\nMode: 1\n\n[Metadata]\n")
+            f.write(f"Title:{metadata.get('Title', 'AI Chart')}\n")
+            f.write(f"Artist:{metadata.get('Artist', 'AI')}\n")
+            f.write(f"Version:{metadata.get('Version', 'Generated')}\n\n")
+            f.write("[Difficulty]\nHPDrainRate:5\nCircleSize:5\nOverallDifficulty:5\nApproachRate:5\nSliderMultiplier:1.4\nSliderTickRate:1\n\n")
+            f.write("[HitObjects]\n")
+            f.write("\n".join(hit_objects))
+
+        print(f"Successfully exported chart to {output_path}")
 
     def export_to_tja(self, tokens, output_path, metadata=None):
         """Exports a sequence of tokens to the .tja file format."""
-        pass
+        if metadata is None:
+            metadata = {
+                'TITLE': 'AI Generated Chart',
+                'WAVE': 'song.ogg',
+                'BPM': 150,
+                'OFFSET': -1.5,
+                'COURSE': 'Oni'
+            }
+
+        note_map = {
+            "don": "1", "ka": "2", "big_don": "3", "big_ka": "4",
+            "roll_start": "5", "roll_end": "8", "finisher": "7"
+        }
+
+        chart_data = []
+        notes_in_measure = 0
+        beats_per_measure = 4 * 4
+
+        detokenized = self.tokenizer.detokenize(tokens)
+        for token_str in detokenized:
+            if token_str in ["[PAD]", "[EMPTY]", "[CLS]", "[SEP]"]:
+                chart_data.append("0")
+            else:
+                events = token_str.split(',')
+                note = "0"
+                for event in events:
+                    if event in note_map:
+                        note = note_map[event]
+                        break
+                chart_data.append(note)
+
+            notes_in_measure += 1
+            if notes_in_measure >= beats_per_measure:
+                chart_data.append(",")
+                notes_in_measure = 0
+
+        with open(output_path, 'w') as f:
+            f.write(f"TITLE:{metadata.get('TITLE', 'AI Chart')}\n")
+            f.write(f"WAVE:{metadata.get('WAVE', 'song.ogg')}\n")
+            f.write(f"BPM:{metadata.get('BPM', 150)}\n")
+            f.write(f"OFFSET:{metadata.get('OFFSET', -1.5)}\n\n")
+            f.write("COURSE:Oni\n")
+            f.write("LEVEL:10\n\n")
+            f.write("#START\n")
+            f.write("".join(chart_data))
+            f.write("\n#END\n")
+
+        print(f"Successfully exported chart to {output_path}")
 
 def main():
     parser = argparse.ArgumentParser(description="Generate a Taiko chart from an audio file.")
@@ -132,6 +209,7 @@ def main():
     parser.add_argument('output_path', type=str, help='Path to save the generated chart file.')
     parser.add_argument('--config', type=str, default='config/default.yaml', help='Path to the configuration file.')
     parser.add_argument('--difficulty', type=str, default='oni', help='Target difficulty for the generated chart.')
+    parser.add_argument('--format', type=str, default='osu', choices=['osu', 'tja'], help='Output chart format.')
 
     args = parser.parse_args()
 
@@ -145,7 +223,10 @@ def main():
         print("Chart generation failed.")
         return
 
-    generator.export_to_osu(tokens, args.output_path)
+    if args.format == 'osu':
+        generator.export_to_osu(tokens, args.output_path)
+    elif args.format == 'tja':
+        generator.export_to_tja(tokens, args.output_path)
 
     print("--- Chart generation complete! ---")
 

@@ -76,7 +76,7 @@ def train_fold(config, fold_idx):
             difficulty_target = batch["difficulty_target"].to(device)
 
             optimizer.zero_grad()
-            predictions = model(src=encoder_input, tgt=decoder_input)
+            predictions = model(src=encoder_input, tgt=decoder_input, target_difficulty=difficulty_target)
 
             token_loss = token_criterion(predictions['tokens'].view(-1, vocab_size), token_target.view(-1))
             difficulty_loss = difficulty_criterion(predictions['difficulty'], difficulty_target)
