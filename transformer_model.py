@@ -1,12 +1,9 @@
 import torch
 import torch.nn as nn
 import math
+import torch.nn.functional as F
 
 class PositionalEncoding(nn.Module):
-    """
-    Adds positional information to the input embeddings, allowing the transformer
-    to understand the order of the sequence.
-    """
     def __init__(self, d_model, max_len=512):
         super(PositionalEncoding, self).__init__()
         pe = torch.zeros(max_len, d_model)
@@ -22,77 +19,72 @@ class PositionalEncoding(nn.Module):
         return x
 
 class TaikoTransformer(nn.Module):
-    """
-    A Transformer model for generating Taiko charts from audio features.
-    It uses an encoder-decoder architecture to map a sequence of audio
-    features to a sequence of note tokens.
-    """
     def __init__(self, vocab_size, d_model=256, nhead=8, num_encoder_layers=6,
                  num_decoder_layers=6, dim_feedforward=1024, dropout=0.1,
                  audio_feature_size=80):
         super(TaikoTransformer, self).__init__()
         self.d_model = d_model
-
-        # --- Layers ---
         self.token_embedding = nn.Embedding(vocab_size, d_model)
         self.pos_encoder = PositionalEncoding(d_model)
-
-        # A linear layer to project the audio features into the model's dimension (d_model)
         self.audio_input_projection = nn.Linear(audio_feature_size, d_model)
-
-        # The core Transformer
         self.transformer = nn.Transformer(
-            d_model=d_model,
-            nhead=nhead,
-            num_encoder_layers=num_encoder_layers,
-            num_decoder_layers=num_decoder_layers,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            batch_first=True # This simplifies tensor manipulation
+            d_model=d_model, nhead=nhead, num_encoder_layers=num_encoder_layers,
+            num_decoder_layers=num_decoder_layers, dim_feedforward=dim_feedforward,
+            dropout=dropout, batch_first=True
         )
-
-        # Final output layer
         self.fc_out = nn.Linear(d_model, vocab_size)
 
     def _generate_square_subsequent_mask(self, sz):
-        """Generates a causal mask for the decoder."""
         mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
         mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
         return mask
 
     def forward(self, src, tgt):
-        """
-        Forward pass of the model.
-
-        Args:
-            src (torch.Tensor): The audio features (encoder input).
-                                Shape: [batch_size, seq_len, audio_feature_size]
-            tgt (torch.Tensor): The note tokens (decoder input).
-                                Shape: [batch_size, seq_len]
-
-        Returns:
-            torch.Tensor: The output logits over the vocabulary.
-                          Shape: [batch_size, seq_len, vocab_size]
-        """
-        # --- Prepare Inputs ---
-        # Project audio features to the model dimension
-        src = self.audio_input_projection(src) * math.sqrt(self.d_model)
-        src = self.pos_encoder(src)
-
-        # Embed and positionally encode the target tokens
-        tgt = self.token_embedding(tgt) * math.sqrt(self.d_model)
-        tgt = self.pos_encoder(tgt)
-
-        # --- Create Masks ---
-        # The decoder needs a causal mask to prevent it from seeing future tokens.
+        src_proj = self.audio_input_projection(src) * math.sqrt(self.d_model)
+        src = self.pos_encoder(src_proj)
+        tgt_embed = self.token_embedding(tgt) * math.sqrt(self.d_model)
+        tgt = self.pos_encoder(tgt_embed)
         tgt_mask = self._generate_square_subsequent_mask(tgt.size(1)).to(src.device)
-
-        # The encoder and decoder also need padding masks if we were to support variable length sequences.
-        # For now, since our dataset pads everything to max_sequence_length, we can omit them for simplicity.
-        # src_key_padding_mask and tgt_key_padding_mask would go here.
-
-        # --- Transformer Pass ---
         output = self.transformer(src, tgt, tgt_mask=tgt_mask)
+        return {"logits": self.fc_out(output), "hidden_states": output}
 
-        # --- Final Output ---
-        return self.fc_out(output)
+    def generate(self, src, max_len, tokenizer, temperature=1.0):
+        self.eval()
+        device = src.device
+        batch_size = src.size(0)
+
+        src_proj = self.audio_input_projection(src) * math.sqrt(self.d_model)
+        memory = self.transformer.encoder(self.pos_encoder(src_proj))
+
+        start_token_id = tokenizer.vocab["[CLS]"]
+        sequences = torch.full((batch_size, 1), start_token_id, dtype=torch.long, device=device)
+        log_probs = torch.zeros(batch_size, 0, device=device) # Start with empty log_probs
+        hidden_states_list = []
+
+        for i in range(max_len):
+            tgt_embedded = self.pos_encoder(self.token_embedding(sequences) * math.sqrt(self.d_model))
+            tgt_mask = self._generate_square_subsequent_mask(sequences.size(1)).to(device)
+
+            output = self.transformer.decoder(tgt_embedded, memory, tgt_mask=tgt_mask)
+            hidden_states_list.append(output[:, -1, :].unsqueeze(1))
+
+            last_token_logits = self.fc_out(output[:, -1, :])
+            probs = F.softmax(last_token_logits / temperature, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+
+            token_log_prob = F.log_softmax(last_token_logits, dim=-1)
+            next_log_prob = torch.gather(token_log_prob, 1, next_token)
+
+            sequences = torch.cat([sequences, next_token], dim=1)
+            log_probs = torch.cat([log_probs, next_log_prob], dim=1)
+
+        # The final generated sequence, excluding the start token
+        final_sequences = sequences[:, 1:]
+        # Concatenate all hidden states
+        final_hidden_states = torch.cat(hidden_states_list, dim=1)
+
+        return {
+            "sequences": final_sequences,
+            "log_probs": log_probs,
+            "hidden_states": final_hidden_states
+        }
