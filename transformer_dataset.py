@@ -20,18 +20,14 @@ class TaikoTransformerDataset(Dataset):
     It loads song-chart pairs, processes them into aligned audio features and
     token sequences, and prepares them for training a sequence-to-sequence model.
     """
-    def __init__(self, all_samples, indices, tokenizer, is_train=True, max_sequence_length=512):
+    def __init__(self, all_samples, indices, is_train=True, max_sequence_length=512, time_quantization_ms=100, source_resolution_ms=23.2):
         self.is_train = is_train
         self.max_sequence_length = max_sequence_length
-        self.tokenizer = tokenizer
+        self.tokenizer = TaikoTokenizer(time_quantization=time_quantization_ms, source_resolution=source_resolution_ms)
         self.samples = [all_samples[i] for i in indices]
-        self.source_resolution_ms = self.tokenizer.source_resolution
-        self.time_quantization_ms = self.tokenizer.time_quantization
-        self.difficulty_map = {
-            'easy': 0, 'normal': 1, 'hard': 2, 'oni': 3, 'ura': 4,
-            'kantan': 0, 'futsuu': 1, 'muzukashii': 2, 'uraoni': 4,
-            'inneroni': 4, 'expert': 3
-        }
+        # Store for use in __getitem__
+        self.source_resolution_ms = source_resolution_ms
+        self.time_quantization_ms = time_quantization_ms
 
     def __len__(self):
         return len(self.samples)
@@ -39,26 +35,37 @@ class TaikoTransformerDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.samples[idx]
 
+        # 1. Load and process audio features
         audio_features = get_audio_features(
             sample["song_path"],
             source_resolution_ms=self.source_resolution_ms,
             frame_duration_ms=self.time_quantization_ms
         )
         if audio_features is None:
-            return None
+            # Return dummy data if audio processing fails
+            return self._get_dummy_item()
 
+        # Apply augmentation only to the training set
         if self.is_train:
             audio_features = augment_spectrogram(audio_features)
 
+        # 2. Load and tokenize chart data
         token_ids = self.tokenizer.tokenize(sample["chart_path"])
         if not token_ids:
-            return None
+            return self._get_dummy_item()
 
+        # 3. Align and pad/truncate sequences
         min_len = min(len(audio_features), len(token_ids))
+
         audio_features = audio_features[:min_len]
         token_ids = token_ids[:min_len]
 
+        # Pad or truncate to max_sequence_length
+        # Audio features padding: 0
+        # Token padding: [PAD] token ID
         pad_token_id = self.tokenizer.vocab["[PAD]"]
+
+        # Pad audio
         audio_padding_length = self.max_sequence_length - audio_features.shape[0]
         if audio_padding_length > 0:
             padding_array = np.zeros((audio_padding_length, audio_features.shape[1]))
@@ -66,29 +73,28 @@ class TaikoTransformerDataset(Dataset):
         else:
             audio_features = audio_features[:self.max_sequence_length]
 
+        # Pad tokens
         token_padding_length = self.max_sequence_length - len(token_ids)
         if token_padding_length > 0:
             token_ids.extend([pad_token_id] * token_padding_length)
         else:
             token_ids = token_ids[:self.max_sequence_length]
 
+        # 4. Prepare inputs for the transformer
+        # Encoder input is the audio features
         encoder_input = torch.from_numpy(audio_features).float()
+
+        # Decoder input is the token sequence, shifted right (starts with [CLS])
         cls_token_id = self.tokenizer.vocab["[CLS]"]
         decoder_input = torch.tensor([cls_token_id] + token_ids[:-1], dtype=torch.long)
-        target = torch.tensor(token_ids, dtype=torch.long)
 
-        difficulty_str = sample.get("difficulty", "unknown").lower()
-        difficulty_class = 3 # Default to 'oni'
-        for key, value in self.difficulty_map.items():
-            if key in difficulty_str:
-                difficulty_class = value
-                break
+        # Target is the original token sequence
+        target = torch.tensor(token_ids, dtype=torch.long)
 
         return {
             "encoder_input": encoder_input,
             "decoder_input": decoder_input,
-            "target": target,
-            "difficulty_target": torch.tensor(difficulty_class, dtype=torch.long)
+            "target": target
         }
 
     def _get_dummy_item(self):
@@ -120,17 +126,10 @@ def get_transformer_data_loaders(config, fold_idx=0):
             try:
                 id_number = chart_filename.split("_")[0]
                 if id_number in song_map:
-                    basename = os.path.splitext(chart_filename)[0]
-                    difficulty = "unknown"
-                    bracket_match = re.search(r'\[([^\]]+)\]$', basename)
-                    if bracket_match:
-                        difficulty = bracket_match.group(1)
-                    else:
-                        last_underscore_pos = basename.rfind('_')
-                        if last_underscore_pos != -1:
-                            potential_difficulty = basename[last_underscore_pos + 1:]
-                            if 0 < len(potential_difficulty) <= 40:
-                                difficulty = potential_difficulty
+                    # Parse difficulty from filename, e.g., "... [oni].npy"
+                    difficulty_match = re.search(r'\[(.*?)\]', chart_filename)
+                    difficulty = difficulty_match.group(1) if difficulty_match else "unknown"
+
                     all_samples.append({
                         "chart_path": os.path.join(INPUT_CHART_DIR, chart_filename),
                         "song_path": os.path.join(INPUT_SONG_DIR, song_map[id_number]),
@@ -153,24 +152,21 @@ def get_transformer_data_loaders(config, fold_idx=0):
 
     # 3. Create Datasets for the current fold
     data_config = config['data']
-    tokenizer = TaikoTokenizer(
-        time_quantization=data_config['time_quantization_ms'],
-        source_resolution=data_config['source_resolution_ms']
-    )
-
     train_dataset = TaikoTransformerDataset(
         all_samples,
         train_indices,
-        tokenizer,
         is_train=True,
         max_sequence_length=data_config['max_sequence_length'],
+        time_quantization_ms=data_config['time_quantization_ms'],
+        source_resolution_ms=data_config['source_resolution_ms']
     )
     val_dataset = TaikoTransformerDataset(
         all_samples,
         val_indices,
-        tokenizer,
         is_train=False,
         max_sequence_length=data_config['max_sequence_length'],
+        time_quantization_ms=data_config['time_quantization_ms'],
+        source_resolution_ms=data_config['source_resolution_ms']
     )
 
     # 4. Create DataLoaders
