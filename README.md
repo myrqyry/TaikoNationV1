@@ -1,73 +1,87 @@
-# 🥁 TaikoNationV1: AI-Powered Taiko Chart Generation 🥁
+# 🥁 TaikoNation: Your Personal AI Taiko Chart Creator! 🥁
 
-Welcome to the modernized TaikoNationV1, a sophisticated AI system for generating high-quality Taiko no Tatsujin (太鼓の達人) charts from any audio file. This project leverages a powerful Transformer-based architecture to understand musical patterns and create playable, engaging charts across multiple difficulty levels.
+Welcome to TaikoNation, the place where music meets AI to create awesome Taiko no Tatsujin charts! 🎶
 
-## ✨ Core Features
+Have you ever wanted to play a Taiko chart for your favorite song, but couldn't find one? Or maybe you're a seasoned charter looking for some AI-powered inspiration? Well, you've come to the right place!
 
-*   **🧠 Advanced Transformer Model:** At its core, TaikoNationV1 uses a `MultiTaskTaikoTransformer` built with PyTorch. This model learns the relationship between audio features and note patterns.
-*   **🎵 Multi-Difficulty Generation:** Generate charts for a specific difficulty level, from `Easy` to `Oni`. The model uses a difficulty-aware pattern memory to produce stylistically appropriate patterns for each level.
-*   **💿 Multiple Export Formats:** Export your generated charts to both `.osu` (for osu!) and `.tja` (for Taiko Jiro and other simulators) formats.
-*   **🧑‍🔬 Human Evaluation Pipeline:** A built-in web server allows for human feedback on generated charts, creating a powerful loop for model improvement.
-*   **🔬 Extensible and Modular:** The codebase is designed to be modular and easy to extend, making it a great platform for research and experimentation in AI and music.
+TaikoNation is a deep learning-based system that can generate a Taiko chart from any song. And now, thanks to the power of Gemini, you can even guide the AI with your own creative prompts! 🚀
+
+## ✨ Features
+
+*   **🤖 AI-Powered Chart Generation:** TaikoNation uses a deep learning model to automatically generate Taiko charts from your favorite songs.
+*   **✍️ Gemini-Powered Prompting:** With the new Gemini integration, you can guide the AI's creativity with your own text prompts. Want a chart with more katsus? Or a super-fast, high-energy chart? Just tell the AI what you want!
+*   **🎤 Audio Feature Extraction:** The system automatically extracts audio features from your songs to feed into the model.
+*   **📦 `.osz` Package Creation:** TaikoNation automatically packages the generated chart and your song into a `.osz` file, ready to be imported into osu!
 
 ## 🚀 Getting Started
 
-### 1. Installation
+Ready to create your own AI-powered Taiko charts? Here's how to get started:
 
-First, clone the repository and install the required dependencies:
+### 1. Clone the Repository
+
+First, you'll need to clone this repository to your local machine. You can do this using the following command:
 
 ```bash
-git clone https://github.com/myrqyry/TaikoNationV1.git
-cd TaikoNationV1
+git clone https://github.com/your-username/TaikoNation.git
+```
+
+### 2. Install Dependencies
+
+Next, you'll need to install the necessary dependencies. TaikoNation uses a few Python libraries to work its magic. You can install them using pip:
+
+```bash
 pip install -r requirements.txt
 ```
 
-### 2. Usage
+**Note:** If you don't have a `requirements.txt` file, you can install the dependencies manually:
 
-#### Generating a Chart
-
-The primary way to generate a chart is through the `generate_chart.py` script.
-
-**Arguments:**
--   `model_path`: Path to a trained model checkpoint (`.pth` file).
--   `audio_path`: Path to the input audio file (must be a pre-processed `.npy` file).
--   `output_path`: Path to save the generated chart file.
--   `--difficulty`: The target difficulty (e.g., `easy`, `normal`, `hard`, `oni`).
--   `--format`: The output format (`osu` or `tja`).
-
-**Example:**
 ```bash
-# Generate an "Oni" chart in .osu format
-python generate_chart.py output/model.pth "input_songs/your_song.npy" "output/generated_charts/my_chart.osu" --difficulty oni --format osu
-
-# Generate a "Hard" chart in .tja format
-python generate_chart.py output/model.pth "input_songs/your_song.npy" "output/generated_charts/my_chart.tja" --difficulty hard --format tja
+pip install google-generativeai numpy essentia pydub
 ```
 
-#### Running the Human Evaluation Server
+You'll also need to install ffmpeg, which is a dependency for pydub. You can find installation instructions for your operating system on the [ffmpeg website](https://ffmpeg.org/download.html).
 
-To collect feedback on generated charts, you can use the human evaluation server.
+### 3. Set Up Your Gemini API Key
 
-1.  Make sure you have some generated charts in the `output/generated_charts` directory.
-2.  Run the server:
+To use the Gemini-powered prompting feature, you'll need to get a Gemini API key. You can get one from the [Google AI Studio](https://aistudio.google.com/).
+
+Once you have your API key, you'll need to set it as an environment variable named `GEMINI_API_KEY`. You can do this by adding the following line to your `.bashrc` or `.zshrc` file:
+
+```bash
+export GEMINI_API_KEY="YOUR_API_KEY"
+```
+
+Replace `"YOUR_API_KEY"` with your actual API key.
+
+## 🎶 Usage
+
+Once you've set up the project, you're ready to start generating charts! Here's how to do it:
+
+1.  **Place your song in the `input_songs` directory.** Make sure your song is in `.mp3` format.
+
+2.  **Run the `gemini_output.py` script.** Open a terminal in the root directory of the project and run the following command:
+
     ```bash
-    python tools/human_eval/server.py
+    python output/gemini_output.py "input_songs/your_song.mp3" "Your creative prompt"
     ```
-3.  Open your web browser and navigate to `http://127.0.0.1:5000`.
 
-## 🔬 For Researchers and Developers
+    Replace `"input_songs/your_song.mp3"` with the path to your song and `"Your creative prompt"` with your desired prompt for the AI.
 
-This project is designed to be a platform for research into AI-driven content creation. Here are some of the key components you can explore:
+3.  **Find your chart in the `output` directory.** Once the script has finished running, you'll find a new `.osz` file in the `output` directory. This file contains your generated chart and your song, ready to be imported into osu!
 
-*   **`transformer_model.py`**: Contains the `MultiTaskTaikoTransformer` architecture, including the difficulty-aware pattern memory.
-*   **`train_transformer.py`**: The main script for training the model.
-*   **`tools/analyze_patterns.py`**: A script for analyzing n-gram frequencies in the dataset.
-*   **`tools/human_eval/server.py`**: The human evaluation server.
+    **Note:** The first time you run the script for a new song, it will take some time to process the audio and extract the features. Subsequent runs for the same song will be much faster.
 
 ## 🙌 Contributing
 
-Contributions are welcome! Whether you're interested in improving the model, adding new features, or enhancing the documentation, feel free to fork the repository and submit a pull request.
+We love contributions! If you'd like to contribute to TaikoNation, please feel free to fork the repository and submit a pull request. Here are some ideas for how you can contribute:
+
+*   **Improve the model:** The current model is a good starting point, but it can always be improved. If you have experience with deep learning and music information retrieval, we'd love to see what you can do!
+*   **Add new features:** Have an idea for a new feature? We'd love to hear it!
+*   **Improve the documentation:** Good documentation is essential for any project. If you see something that could be clearer or more detailed, please let us know.
+*   **Report bugs:** If you find a bug, please open an issue on GitHub.
+
+We're excited to see what you come up with!
 
 ## 📜 License
 
-TaikoNationV1 is released under the [MIT License](LICENSE).
+TaikoNation is released under the [MIT License](LICENSE).

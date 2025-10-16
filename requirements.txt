@@ -7,5 +7,3 @@ numpy
 tflearn
 tensorflow
 PyYAML>=5.0
-Flask>=2.0
-pandas>=1.0
