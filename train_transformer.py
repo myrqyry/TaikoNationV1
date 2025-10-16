@@ -42,6 +42,7 @@ def train_fold(config, fold_idx):
     model = MultiTaskTaikoTransformer(
         vocab_size=vocab_size,
         num_difficulty_classes=config['training']['multi_task']['num_difficulty_classes'],
+        patterns_per_diff=config['training']['multi_task']['patterns_per_diff'],
         **model_config
     ).to(device)
     wandb.watch(model, log="all")

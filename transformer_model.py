@@ -120,7 +120,6 @@ class PatternAwareTransformer(TaikoTransformer):
         """
         base_output = self.forward_features(src, tgt)
 
-        # The key difference is capturing the attention weights (attn_weights)
         pattern_context, attn_weights = self.pattern_attention(
             query=base_output,
             key=self.pattern_memory.unsqueeze(0).repeat(base_output.size(0), 1, 1),
@@ -138,37 +137,46 @@ class PatternAwareTransformer(TaikoTransformer):
 
 class MultiTaskTaikoTransformer(PatternAwareTransformer):
     """
-    Extends PatternAwareTransformer to predict difficulty as an auxiliary task.
+    Extends PatternAwareTransformer to use a difficulty-aware pattern memory.
     """
-    def __init__(self, num_difficulty_classes=5, *args, **kwargs):
+    def __init__(self, num_difficulty_classes=5, patterns_per_diff=200, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.difficulty_embedding = nn.Embedding(num_difficulty_classes, self.d_model)
         self.difficulty_head = nn.Linear(self.d_model, num_difficulty_classes)
 
+        # Replace the single pattern memory with a difficulty-specific one
+        self.pattern_memory = nn.Parameter(
+            torch.randn(num_difficulty_classes, patterns_per_diff, self.d_model)
+        )
+
     def forward(self, src, tgt, target_difficulty=None, return_attention=False):
         """
         Forward pass for the multi-task model.
-
-        Returns a dictionary with 'tokens' and 'difficulty' outputs.
         """
         base_output = self.forward_features(src, tgt)
 
         # Add difficulty conditioning
         if target_difficulty is not None:
             difficulty_emb = self.difficulty_embedding(target_difficulty)
-            # Add the difficulty embedding to every time step of the output
             base_output = base_output + difficulty_emb.unsqueeze(1)
+
+        # Select the appropriate pattern memory based on the target difficulty
+        if target_difficulty is not None:
+            # Select the pattern memory for each item in the batch
+            relevant_patterns = torch.index_select(self.pattern_memory, 0, target_difficulty)
+        else:
+            # Default to the first difficulty bank if none is specified
+            relevant_patterns = self.pattern_memory[0].unsqueeze(0).repeat(base_output.size(0), 1, 1)
 
         pattern_context, attn_weights = self.pattern_attention(
             query=base_output,
-            key=self.pattern_memory.unsqueeze(0).repeat(base_output.size(0), 1, 1),
-            value=self.pattern_memory.unsqueeze(0).repeat(base_output.size(0), 1, 1)
+            key=relevant_patterns,
+            value=relevant_patterns
         )
 
         refined_output = base_output + pattern_context
         token_logits = self.fc_out(refined_output)
 
-        # Use the mean of the sequence features for difficulty prediction
         pooled_output = refined_output.mean(dim=1)
         difficulty_logits = self.difficulty_head(pooled_output)
 

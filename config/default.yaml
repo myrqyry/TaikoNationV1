@@ -42,6 +42,7 @@ training:
   multi_task:
     num_difficulty_classes: 5
     difficulty_loss_weight: 0.2
+    patterns_per_diff: 200
 
 # --- Development Settings ---
 dry_run: false # Set to true to run a quick test with one fold and fewer batches
