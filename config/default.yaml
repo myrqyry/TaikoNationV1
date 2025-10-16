@@ -40,16 +40,3 @@ training:
 
 # --- Development Settings ---
 dry_run: false # Set to true to run a quick test with one fold and fewer batches
-
-# --- RLHF / PPO Fine-Tuning Settings ---
-ppo:
-  enabled: true
-  reward_model_path: "output/reward_model.pth"
-  ppo_epochs: 10
-  ppo_learning_rate: 0.00001
-  clip_epsilon: 0.2
-  entropy_bonus_weight: 0.01
-  kl_penalty_weight: 0.05
-  # Settings for PPO rollouts
-  max_generation_length: 128 # Reduced to lower memory usage
-  num_rollouts: 4 # Keep this low to manage memory
