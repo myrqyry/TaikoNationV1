@@ -7,7 +7,7 @@ import yaml
 import argparse
 
 from transformer_dataset import get_transformer_data_loaders
-from transformer_model import TaikoTransformer
+from transformer_model import MultiTaskTaikoTransformer
 from tokenization import TaikoTokenizer
 
 def load_config(path="config/default.yaml"):
@@ -37,14 +37,18 @@ def train_fold(config, fold_idx):
     pad_token_id = tokenizer.vocab["[PAD]"]
 
     # --- Model ---
-    model = TaikoTransformer(
+    model_config = config['model']
+    model_config.pop('vocab_size', None) # Remove to avoid conflict
+    model = MultiTaskTaikoTransformer(
         vocab_size=vocab_size,
-        **config['model'] # Unpack model hyperparameters
+        num_difficulty_classes=config['training']['multi_task']['num_difficulty_classes'],
+        **model_config
     ).to(device)
     wandb.watch(model, log="all")
 
     # --- Training Components ---
-    criterion = nn.CrossEntropyLoss(ignore_index=pad_token_id)
+    token_criterion = nn.CrossEntropyLoss(ignore_index=pad_token_id)
+    difficulty_criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=config['training']['learning_rate'])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, 'min', **config['training']['scheduler']
@@ -55,52 +59,85 @@ def train_fold(config, fold_idx):
     epochs_no_improve = 0
     early_stopping_patience = config['training']['early_stopping']['patience']
     min_delta = config['training']['early_stopping']['min_delta']
+    diff_weight = config['training']['multi_task']['difficulty_loss_weight']
 
     model_save_path = f"{config['training']['save_path']}_fold_{fold_idx + 1}.pth"
     os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
 
     for epoch in range(config['training']['num_epochs']):
         model.train()
-        running_loss = 0.0
+        running_loss, running_token_loss, running_diff_loss = 0.0, 0.0, 0.0
         for i, batch in enumerate(train_loader):
             if batch is None: continue
 
             encoder_input = batch["encoder_input"].to(device)
             decoder_input = batch["decoder_input"].to(device)
-            target = batch["target"].to(device)
+            token_target = batch["target"].to(device)
+            difficulty_target = batch["difficulty_target"].to(device)
 
             optimizer.zero_grad()
-            output = model(src=encoder_input, tgt=decoder_input)
-            loss = criterion(output.view(-1, vocab_size), target.view(-1))
-            loss.backward()
+            predictions = model(src=encoder_input, tgt=decoder_input)
+
+            token_loss = token_criterion(predictions['tokens'].view(-1, vocab_size), token_target.view(-1))
+            difficulty_loss = difficulty_criterion(predictions['difficulty'], difficulty_target)
+
+            total_loss = token_loss + diff_weight * difficulty_loss
+            total_loss.backward()
             optimizer.step()
 
-            running_loss += loss.item()
+            running_loss += total_loss.item()
+            running_token_loss += token_loss.item()
+            running_diff_loss += difficulty_loss.item()
+
             if i % 50 == 49:
                 batch_loss = running_loss / 50
-                print(f"[Fold {fold_idx+1}, Epoch {epoch+1}, Batch {i+1}] loss: {batch_loss:.4f}")
-                wandb.log({"train_loss": batch_loss, "epoch": epoch})
-                running_loss = 0.0
+                batch_token_loss = running_token_loss / 50
+                batch_diff_loss = running_diff_loss / 50
+                print(f"[Fold {fold_idx+1}, E {epoch+1}, B {i+1}] Loss: {batch_loss:.4f} (Tok: {batch_token_loss:.4f}, Diff: {batch_diff_loss:.4f})")
+                wandb.log({
+                    "train_loss_total": batch_loss,
+                    "train_loss_token": batch_token_loss,
+                    "train_loss_difficulty": batch_diff_loss,
+                    "epoch": epoch
+                })
+                running_loss, running_token_loss, running_diff_loss = 0.0, 0.0, 0.0
 
 
         # --- Validation ---
         model.eval()
-        val_loss = 0.0
+        val_loss, val_token_loss, val_diff_loss = 0.0, 0.0, 0.0
         with torch.no_grad():
             for batch in val_loader:
                 if batch is None: continue
 
                 encoder_input = batch["encoder_input"].to(device)
                 decoder_input = batch["decoder_input"].to(device)
-                target = batch["target"].to(device)
+                token_target = batch["target"].to(device)
+                difficulty_target = batch["difficulty_target"].to(device)
 
-                output = model(src=encoder_input, tgt=decoder_input)
-                loss = criterion(output.view(-1, vocab_size), target.view(-1))
-                val_loss += loss.item()
+                predictions = model(src=encoder_input, tgt=decoder_input)
+
+                token_loss = token_criterion(predictions['tokens'].view(-1, vocab_size), token_target.view(-1))
+                difficulty_loss = difficulty_criterion(predictions['difficulty'], difficulty_target)
+
+                total_loss = token_loss + diff_weight * difficulty_loss
+
+                val_loss += total_loss.item()
+                val_token_loss += token_loss.item()
+                val_diff_loss += difficulty_loss.item()
 
         val_loss /= len(val_loader)
-        print(f"[Fold {fold_idx+1}, Epoch {epoch+1}] val_loss: {val_loss:.4f}")
-        wandb.log({"val_loss": val_loss, "epoch": epoch, "lr": optimizer.param_groups[0]['lr']})
+        val_token_loss /= len(val_loader)
+        val_diff_loss /= len(val_loader)
+
+        print(f"[Fold {fold_idx+1}, E {epoch+1}] Val Loss: {val_loss:.4f} (Tok: {val_token_loss:.4f}, Diff: {val_diff_loss:.4f})")
+        wandb.log({
+            "val_loss_total": val_loss,
+            "val_loss_token": val_token_loss,
+            "val_loss_difficulty": val_diff_loss,
+            "epoch": epoch,
+            "lr": optimizer.param_groups[0]['lr']
+        })
 
         scheduler.step(val_loss)
 
