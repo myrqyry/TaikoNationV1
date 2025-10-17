@@ -193,15 +193,11 @@ If you use this work in your research, please cite both the original paper and t
 
 @misc{taikonationv1_2025,
   title={TaikoNationV1: Modern Implementation with Multi-Difficulty and Pattern-Aware Generation},
-  author={[Your Name]},
+  author={myrqyry},
   year={2025},
   url={https://github.com/myrqyry/TaikoNationV1}
 }
 ```
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
 
