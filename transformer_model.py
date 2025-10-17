@@ -27,7 +27,7 @@ class TaikoTransformer(nn.Module):
     It uses an encoder-decoder architecture to map a sequence of audio
     features to a sequence of note tokens.
     """
-    def __init__(self, vocab_size, num_genres, d_model=256, nhead=8, num_encoder_layers=6,
+    def __init__(self, vocab_size, num_genres, num_difficulties, d_model=256, nhead=8, num_encoder_layers=6,
                  num_decoder_layers=6, dim_feedforward=1024, dropout=0.1,
                  audio_feature_size=80):
         super(TaikoTransformer, self).__init__()
@@ -36,6 +36,7 @@ class TaikoTransformer(nn.Module):
         # --- Layers ---
         self.token_embedding = nn.Embedding(vocab_size, d_model)
         self.genre_embedding = nn.Embedding(num_genres, d_model)
+        self.difficulty_embedding = nn.Embedding(num_difficulties, d_model)
         self.pos_encoder = PositionalEncoding(d_model)
 
         # A linear layer to project the audio features into the model's dimension (d_model)
@@ -61,13 +62,14 @@ class TaikoTransformer(nn.Module):
         mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
         return mask
 
-    def forward(self, src, tgt, genre_id):
+    def forward(self, src, tgt, genre_id, difficulty_id):
         """
         Forward pass of the model.
         Args:
             src (torch.Tensor): The audio features (encoder input).
             tgt (torch.Tensor): The note tokens (decoder input).
             genre_id (torch.Tensor): The ID of the genre for style conditioning.
+            difficulty_id (torch.Tensor): The ID of the difficulty.
         Returns:
             torch.Tensor: The output logits over the vocabulary.
         """
@@ -75,10 +77,11 @@ class TaikoTransformer(nn.Module):
         src = self.audio_input_projection(src) * math.sqrt(self.d_model)
         src = self.pos_encoder(src)
 
-        # Embed tokens, add genre style, and add positional encoding
+        # Embed tokens, add genre and difficulty styles, and add positional encoding
         tgt_embed = self.token_embedding(tgt) * math.sqrt(self.d_model)
         genre_embed = self.genre_embedding(genre_id).unsqueeze(1).expand_as(tgt_embed)
-        tgt = self.pos_encoder(tgt_embed + genre_embed)
+        difficulty_embed = self.difficulty_embedding(difficulty_id).unsqueeze(1).expand_as(tgt_embed)
+        tgt = self.pos_encoder(tgt_embed + genre_embed + difficulty_embed)
 
         # --- Create Masks ---
         # The decoder needs a causal mask to prevent it from seeing future tokens.

@@ -7,7 +7,7 @@ import yaml
 import argparse
 import json
 
-from transformer_dataset import get_transformer_data_loaders
+from transformer_dataset import get_transformer_data_loaders, DIFFICULTY_MAP
 from transformer_model import TaikoTransformer
 from tokenization import TaikoTokenizer
 
@@ -29,6 +29,7 @@ def train_fold(config, fold_idx):
     model = TaikoTransformer(
         vocab_size=tokenizer.vocab_size,
         num_genres=len(genre_vocab),
+        num_difficulties=len(DIFFICULTY_MAP),
         **config['model']
     ).to(device)
     wandb.watch(model, log="all")
@@ -49,9 +50,10 @@ def train_fold(config, fold_idx):
             decoder_input = batch["decoder_input"].to(device)
             target = batch["target"].to(device)
             genre_id = batch["genre_id"].to(device)
+            difficulty_id = batch["difficulty"].to(device)
 
             optimizer.zero_grad()
-            output = model(encoder_input, decoder_input, genre_id)
+            output = model(encoder_input, decoder_input, genre_id, difficulty_id)
             loss = criterion(output.view(-1, tokenizer.vocab_size), target.view(-1))
             loss.backward()
             optimizer.step()
@@ -65,8 +67,9 @@ def train_fold(config, fold_idx):
                 decoder_input = batch["decoder_input"].to(device)
                 target = batch["target"].to(device)
                 genre_id = batch["genre_id"].to(device)
+                difficulty_id = batch["difficulty"].to(device)
 
-                output = model(encoder_input, decoder_input, genre_id)
+                output = model(encoder_input, decoder_input, genre_id, difficulty_id)
                 loss = criterion(output.view(-1, tokenizer.vocab_size), target.view(-1))
                 val_loss += loss.item()
 
