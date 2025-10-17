@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import re
 from torch.utils.data import Dataset, DataLoader
+from sklearn.model_selection import KFold
 
 from tokenization import TaikoTokenizer
 from audio_processing import get_audio_features, augment_spectrogram
@@ -10,179 +11,129 @@ from audio_processing import get_audio_features, augment_spectrogram
 # --- Constants ---
 INPUT_CHART_DIR = "input_charts_nr"
 INPUT_SONG_DIR = "input_songs"
-TEST_DATA_INDICES = [2, 5, 9, 82, 28, 22, 81, 43, 96, 97]
+OSU_CHART_DIR = "eval/evaluation dataset/human_taiko_set" # Corrected path
 
-from sklearn.model_selection import KFold
+DIFFICULTY_MAP = {"easy": 0, "normal": 1, "hard": 2, "oni": 3, "ura": 4, "unknown": 1}
+
+def parse_osu_file(osu_path):
+    metadata = {}
+    try:
+        with open(osu_path, 'r', encoding='utf-8') as f:
+            in_metadata_section = False
+            for line in f:
+                line = line.strip()
+                if line == "[Metadata]":
+                    in_metadata_section = True
+                elif line.startswith("["):
+                    in_metadata_section = False
+                if in_metadata_section and ':' in line:
+                    key, value = line.split(':', 1)
+                    metadata[key.strip()] = value.strip()
+    except Exception as e:
+        print(f"Warning: Could not parse {osu_path}: {e}")
+    return metadata
 
 class TaikoTransformerDataset(Dataset):
-    """
-    A PyTorch Dataset for the Taiko Transformer model.
-    It loads song-chart pairs, processes them into aligned audio features and
-    token sequences, and prepares them for training a sequence-to-sequence model.
-    """
-    def __init__(self, all_samples, indices, is_train=True, max_sequence_length=512, time_quantization_ms=100, source_resolution_ms=23.2):
+    def __init__(self, all_samples, indices, tokenizer, mapper_vocab, is_train=True, max_sequence_length=512):
         self.is_train = is_train
         self.max_sequence_length = max_sequence_length
-        self.tokenizer = TaikoTokenizer(time_quantization=time_quantization_ms, source_resolution=source_resolution_ms)
+        self.tokenizer = tokenizer
+        self.mapper_vocab = mapper_vocab
         self.samples = [all_samples[i] for i in indices]
-        # Store for use in __getitem__
-        self.source_resolution_ms = source_resolution_ms
-        self.time_quantization_ms = time_quantization_ms
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
+        audio_features = get_audio_features(sample["song_path"])
+        if audio_features is None: return None
 
-        # 1. Load and process audio features
-        audio_features = get_audio_features(
-            sample["song_path"],
-            source_resolution_ms=self.source_resolution_ms,
-            frame_duration_ms=self.time_quantization_ms
-        )
-        if audio_features is None:
-            # Return dummy data if audio processing fails
-            return self._get_dummy_item()
-
-        # Apply augmentation only to the training set
         if self.is_train:
             audio_features = augment_spectrogram(audio_features)
 
-        # 2. Load and tokenize chart data
         token_ids = self.tokenizer.tokenize(sample["chart_path"])
-        if not token_ids:
-            return self._get_dummy_item()
+        if not token_ids: return None
 
-        # 3. Align and pad/truncate sequences
         min_len = min(len(audio_features), len(token_ids))
-
         audio_features = audio_features[:min_len]
         token_ids = token_ids[:min_len]
 
-        # Pad or truncate to max_sequence_length
-        # Audio features padding: 0
-        # Token padding: [PAD] token ID
-        pad_token_id = self.tokenizer.vocab["[PAD]"]
-
-        # Pad audio
-        audio_padding_length = self.max_sequence_length - audio_features.shape[0]
-        if audio_padding_length > 0:
-            padding_array = np.zeros((audio_padding_length, audio_features.shape[1]))
-            audio_features = np.vstack([audio_features, padding_array])
+        # Pad or truncate audio and tokens
+        if audio_features.shape[0] < self.max_sequence_length:
+            audio_padding = torch.zeros(self.max_sequence_length - audio_features.shape[0], audio_features.shape[1])
+            audio_features = torch.cat([torch.from_numpy(audio_features), audio_padding], dim=0)
         else:
-            audio_features = audio_features[:self.max_sequence_length]
+            audio_features = torch.from_numpy(audio_features[:self.max_sequence_length])
 
-        # Pad tokens
-        token_padding_length = self.max_sequence_length - len(token_ids)
-        if token_padding_length > 0:
-            token_ids.extend([pad_token_id] * token_padding_length)
+        if len(token_ids) < self.max_sequence_length:
+            token_ids.extend([self.tokenizer.vocab["[PAD]"]] * (self.max_sequence_length - len(token_ids)))
         else:
             token_ids = token_ids[:self.max_sequence_length]
 
-        # 4. Prepare inputs for the transformer
-        # Encoder input is the audio features
-        encoder_input = torch.from_numpy(audio_features).float()
-
-        # Decoder input is the token sequence, shifted right (starts with [CLS])
-        cls_token_id = self.tokenizer.vocab["[CLS]"]
-        decoder_input = torch.tensor([cls_token_id] + token_ids[:-1], dtype=torch.long)
-
-        # Target is the original token sequence
+        encoder_input = audio_features
+        decoder_input = torch.tensor([self.tokenizer.vocab["[CLS]"]] + token_ids[:-1], dtype=torch.long)
         target = torch.tensor(token_ids, dtype=torch.long)
 
+        difficulty_label = torch.tensor(DIFFICULTY_MAP.get(sample["difficulty"], 1), dtype=torch.long)
+        mapper_id = torch.tensor(self.mapper_vocab.get(sample.get("mapper", "unknown"), 0), dtype=torch.long)
+
         return {
-            "encoder_input": encoder_input,
-            "decoder_input": decoder_input,
-            "target": target
+            "encoder_input": encoder_input, "decoder_input": decoder_input, "target": target,
+            "difficulty": difficulty_label, "mapper_id": mapper_id
         }
 
-    def _get_dummy_item(self):
-        """Returns an empty/dummy item to be filtered out by the collate_fn."""
-        return None
-
-
-def collate_fn(batch):
-    """Custom collate function to filter out None (failed) samples."""
-    batch = [b for b in batch if b is not None]
-    if not batch:
-        return None
-    return torch.utils.data.dataloader.default_collate(batch)
-
-
 def get_transformer_data_loaders(config, fold_idx=0):
-    """
-    Creates and returns training and testing DataLoaders for a specific
-    cross-validation fold.
-    """
-    # 1. Prepare the full list of samples
-    all_samples = []
-    try:
-        charts = sorted(os.listdir(path=INPUT_CHART_DIR))
-        songs = os.listdir(path=INPUT_SONG_DIR)
-        song_map = {s.split()[0]: s for s in songs}
+    osu_map = {}
+    if os.path.exists(OSU_CHART_DIR):
+        for filename in os.listdir(OSU_CHART_DIR):
+            if filename.endswith(".osu"):
+                meta = parse_osu_file(os.path.join(OSU_CHART_DIR, filename))
+                if 'Title' in meta:
+                    # Normalize title for better matching
+                    osu_map[meta['Title'].lower()] = {'path': os.path.join(OSU_CHART_DIR, filename), 'meta': meta}
 
-        for chart_filename in charts:
-            try:
-                id_number = chart_filename.split("_")[0]
-                if id_number in song_map:
-                    # Parse difficulty from filename, e.g., "... [oni].npy"
-                    difficulty_match = re.search(r'\[(.*?)\]', chart_filename)
-                    difficulty = difficulty_match.group(1) if difficulty_match else "unknown"
+    all_samples, mappers = [], set(["unknown"])
+    charts = sorted(os.listdir(INPUT_CHART_DIR))
+    song_map = {s.split()[0]: s for s in os.listdir(INPUT_SONG_DIR)}
 
-                    all_samples.append({
-                        "chart_path": os.path.join(INPUT_CHART_DIR, chart_filename),
-                        "song_path": os.path.join(INPUT_SONG_DIR, song_map[id_number]),
-                        "difficulty": difficulty
-                    })
-            except IndexError:
-                continue
-    except FileNotFoundError as e:
-        print(f"Error: Input directory not found - {e}.")
-        return None, None, None
+    for chart_filename in charts:
+        try:
+            # Extract title from the npy filename more robustly
+            parts = chart_filename.replace('_', ' ').split()
+            title = parts[1]
 
-    print(f"Found a total of {len(all_samples)} samples.")
+            if parts[0] in song_map:
+                sample = {
+                    "chart_path": os.path.join(INPUT_CHART_DIR, chart_filename),
+                    "song_path": os.path.join(INPUT_SONG_DIR, song_map[parts[0]]),
+                    "difficulty": "unknown"
+                }
 
-    # 2. Create K-Fold splits
+                # Find corresponding .osu and get mapper
+                if title.lower() in osu_map:
+                    mapper = osu_map[title.lower()]['meta'].get('Creator', 'unknown')
+                    sample['mapper'] = mapper
+                    mappers.add(mapper)
+                    # Try to get difficulty from .osu as well
+                    sample['difficulty'] = osu_map[title.lower()]['meta'].get('Version', 'unknown').lower()
+
+
+                all_samples.append(sample)
+        except (ValueError, IndexError):
+            continue
+
+    mapper_vocab = {name: i for i, name in enumerate(sorted(list(mappers)))}
+    print(f"Found {len(all_samples)} samples and {len(mapper_vocab)} mappers.")
+
     kf = KFold(n_splits=config['training']['k_folds'], shuffle=True, random_state=42)
-    all_splits = list(kf.split(all_samples))
-    train_indices, val_indices = all_splits[fold_idx]
+    train_indices, val_indices = list(kf.split(all_samples))[fold_idx]
 
-    print(f"Fold {fold_idx + 1}/{config['training']['k_folds']}: {len(train_indices)} train, {len(val_indices)} validation samples.")
+    tokenizer = TaikoTokenizer()
+    train_dataset = TaikoTransformerDataset(all_samples, train_indices, tokenizer, mapper_vocab, is_train=True, max_sequence_length=config['data']['max_sequence_length'])
+    val_dataset = TaikoTransformerDataset(all_samples, val_indices, tokenizer, mapper_vocab, is_train=False, max_sequence_length=config['data']['max_sequence_length'])
 
-    # 3. Create Datasets for the current fold
-    data_config = config['data']
-    train_dataset = TaikoTransformerDataset(
-        all_samples,
-        train_indices,
-        is_train=True,
-        max_sequence_length=data_config['max_sequence_length'],
-        time_quantization_ms=data_config['time_quantization_ms'],
-        source_resolution_ms=data_config['source_resolution_ms']
-    )
-    val_dataset = TaikoTransformerDataset(
-        all_samples,
-        val_indices,
-        is_train=False,
-        max_sequence_length=data_config['max_sequence_length'],
-        time_quantization_ms=data_config['time_quantization_ms'],
-        source_resolution_ms=data_config['source_resolution_ms']
-    )
+    train_loader = DataLoader(train_dataset, batch_size=config['training']['batch_size'], shuffle=True, collate_fn=lambda b: torch.utils.data.dataloader.default_collate([x for x in b if x is not None]))
+    val_loader = DataLoader(val_dataset, batch_size=config['training']['batch_size'], shuffle=False, collate_fn=lambda b: torch.utils.data.dataloader.default_collate([x for x in b if x is not None]))
 
-    # 4. Create DataLoaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config['training']['batch_size'],
-        shuffle=True,
-        num_workers=2,
-        collate_fn=collate_fn
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config['training']['batch_size'],
-        shuffle=False,
-        num_workers=2,
-        collate_fn=collate_fn
-    )
-    # Return the tokenizer from one of the datasets (they are identical)
-    return train_loader, val_loader, train_dataset.tokenizer
+    return train_loader, val_loader, tokenizer, mapper_vocab
