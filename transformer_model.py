@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import math
+import torch.nn.functional as F
 
 class PositionalEncoding(nn.Module):
     """
@@ -27,7 +28,7 @@ class TaikoTransformer(nn.Module):
     It uses an encoder-decoder architecture to map a sequence of audio
     features to a sequence of note tokens.
     """
-    def __init__(self, vocab_size, num_mappers, d_model=256, nhead=8, num_encoder_layers=6,
+    def __init__(self, vocab_size, d_model=256, nhead=8, num_encoder_layers=6,
                  num_decoder_layers=6, dim_feedforward=1024, dropout=0.1,
                  audio_feature_size=80):
         super(TaikoTransformer, self).__init__()
@@ -35,7 +36,6 @@ class TaikoTransformer(nn.Module):
 
         # --- Layers ---
         self.token_embedding = nn.Embedding(vocab_size, d_model)
-        self.mapper_embedding = nn.Embedding(num_mappers, d_model)
         self.pos_encoder = PositionalEncoding(d_model)
 
         # A linear layer to project the audio features into the model's dimension (d_model)
@@ -61,24 +61,28 @@ class TaikoTransformer(nn.Module):
         mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
         return mask
 
-    def forward(self, src, tgt, mapper_id):
+    def forward(self, src, tgt):
         """
         Forward pass of the model.
+
         Args:
             src (torch.Tensor): The audio features (encoder input).
+                                Shape: [batch_size, seq_len, audio_feature_size]
             tgt (torch.Tensor): The note tokens (decoder input).
-            mapper_id (torch.Tensor): The ID of the mapper for style conditioning.
+                                Shape: [batch_size, seq_len]
+
         Returns:
             torch.Tensor: The output logits over the vocabulary.
+                          Shape: [batch_size, seq_len, vocab_size]
         """
         # --- Prepare Inputs ---
+        # Project audio features to the model dimension
         src = self.audio_input_projection(src) * math.sqrt(self.d_model)
         src = self.pos_encoder(src)
 
-        # Embed tokens, add mapper style, and add positional encoding
-        tgt_embed = self.token_embedding(tgt) * math.sqrt(self.d_model)
-        mapper_embed = self.mapper_embedding(mapper_id).unsqueeze(1).expand_as(tgt_embed)
-        tgt = self.pos_encoder(tgt_embed + mapper_embed)
+        # Embed and positionally encode the target tokens
+        tgt = self.token_embedding(tgt) * math.sqrt(self.d_model)
+        tgt = self.pos_encoder(tgt)
 
         # --- Create Masks ---
         # The decoder needs a causal mask to prevent it from seeing future tokens.
@@ -93,3 +97,31 @@ class TaikoTransformer(nn.Module):
 
         # --- Final Output ---
         return self.fc_out(output)
+
+    def generate(self, src, max_len=512, temperature=1.0):
+        """
+        Autoregressively generates a sequence of tokens.
+        """
+        self.eval()
+        device = src.device
+        batch_size = src.size(0)
+
+        memory = self.transformer.encoder(self.pos_encoder(self.audio_input_projection(src) * math.sqrt(self.d_model)))
+
+        # Start with the [CLS] token
+        sequences = torch.full((batch_size, 1), self.token_embedding.weight.size(0) - 1, dtype=torch.long, device=device) # Assuming CLS is last
+
+        for i in range(max_len):
+            tgt_embedded = self.pos_encoder(self.token_embedding(sequences) * math.sqrt(self.d_model))
+            tgt_mask = self._generate_square_subsequent_mask(sequences.size(1)).to(device)
+
+            output = self.transformer.decoder(tgt_embedded, memory, tgt_mask=tgt_mask)
+            last_token_logits = self.fc_out(output[:, -1, :])
+
+            # Apply temperature and sample
+            probs = F.softmax(last_token_logits / temperature, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+
+            sequences = torch.cat([sequences, next_token], dim=1)
+
+        return sequences[:, 1:] # Return sequence without start token
