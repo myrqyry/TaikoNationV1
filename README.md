@@ -1,6 +1,6 @@
 # TaikoNationV1: AI-Powered Taiko Chart Generation
 
-[![License: MIT](https://img.shields.://opensource.org/licenses/MITfor generating human-like Taiko no Tatsujin beatmaps from audio, with multi-difficulty support and pattern-aware intelligence.
+for generating human-like Taiko no Tatsujin beatmaps from audio, with multi-difficulty support and pattern-aware intelligence.
 
 ## Overview
 
