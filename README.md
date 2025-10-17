@@ -1,87 +1,214 @@
-# 🥁 TaikoNation: Your Personal AI Taiko Chart Creator! 🥁
+# TaikoNationV1: AI-Powered Taiko Chart Generation
 
-Welcome to TaikoNation, the place where music meets AI to create awesome Taiko no Tatsujin charts! 🎶
+[![License: MIT](https://img.shields.://opensource.org/licenses/MITfor generating human-like Taiko no Tatsujin beatmaps from audio, with multi-difficulty support and pattern-aware intelligence.
 
-Have you ever wanted to play a Taiko chart for your favorite song, but couldn't find one? Or maybe you're a seasoned charter looking for some AI-powered inspiration? Well, you've come to the right place!
+## Overview
 
-TaikoNation is a deep learning-based system that can generate a Taiko chart from any song. And now, thanks to the power of Gemini, you can even guide the AI with your own creative prompts! 🚀
+TaikoNationV1 is a modernized implementation of the groundbreaking research from [**"TaikoNation: Patterning-focused Chart Generation for Rhythm Action Games"**](https://arxiv.org/abs/2107.12506) by Emily Halina and Matthew Guzdial (2021). This project extends the original work with state-of-the-art transformer architecture, multi-difficulty generation, and human-in-the-loop evaluation.
 
-## ✨ Features
+### What Makes This Special
 
-*   **🤖 AI-Powered Chart Generation:** TaikoNation uses a deep learning model to automatically generate Taiko charts from your favorite songs.
-*   **✍️ Gemini-Powered Prompting:** With the new Gemini integration, you can guide the AI's creativity with your own text prompts. Want a chart with more katsus? Or a super-fast, high-energy chart? Just tell the AI what you want!
-*   **🎤 Audio Feature Extraction:** The system automatically extracts audio features from your songs to feed into the model.
-*   **📦 `.osz` Package Creation:** TaikoNation automatically packages the generated chart and your song into a `.osz` file, ready to be imported into osu!
+Unlike traditional onset-detection approaches, TaikoNation focuses on **human-like patterning** - creating charts where note placement forms musically coherent patterns that feel natural to play. This implementation takes that core innovation and enhances it with modern AI techniques.
 
-## 🚀 Getting Started
+## Key Features
 
-Ready to create your own AI-powered Taiko charts? Here's how to get started:
+### 🎯 **Multi-Difficulty Generation**
+- Generate charts for any difficulty: Easy, Normal, Hard, Oni, Ura Oni
+- Difficulty-aware pattern memory learns appropriate patterns for each skill level
+- Smooth difficulty progression for educational use
 
-### 1. Clone the Repository
+### 🧠 **Pattern-Aware Intelligence**
+- **Sliding window loss** ensures local pattern coherence
+- **Pattern memory attention** learns and reuses common rhythmic motifs
+- **Multi-task learning** optimizes for both note accuracy and difficulty consistency
 
-First, you'll need to clone this repository to your local machine. You can do this using the following command:
+### 🔄 **Human-in-the-Loop Evaluation**
+- Built-in web server for collecting human ratings
+- Multi-criteria evaluation: Fun, Musicality, Playability, Pattern Coherence
+- Data pipeline for reinforcement learning from human feedback (RLHF)
 
-```bash
-git clone https://github.com/your-username/TaikoNation.git
+### 🚀 **Production Ready**
+- CLI tool for batch generation
+- Export to `.osu` and `.tja` formats
+- RESTful API server for web integration
+- Comprehensive configuration management
+
+## Research Foundation
+
+This work builds on the original TaikoNation paper's key insights:
+
+> *"Patterning is a key identifier of high quality rhythm game content, seen as a necessary component in human rankings. We establish a new approach for chart generation that produces charts with more congruent, human-like patterning than seen in prior work."*
+
+**Original Contributions (Halina & Guzdial, 2021):**
+- Sliding window prediction for pattern continuity
+- Curated high-difficulty training data
+- Pattern overlap and pattern space coverage metrics
+
+**Our Extensions (2025):**
+- Modern transformer architecture with attention mechanisms
+- Difficulty-conditioned generation with separate pattern memories
+- Real-time human evaluation and preference learning
+- Multi-task learning framework
+- Production-ready deployment pipeline
+
+## Architecture
+
+```
+Audio Features → Encoder → Pattern-Aware → Multi-Task → Chart Tokens
+                          Transformer     Heads      
+                               ↓
+                     Difficulty-Specific
+                     Pattern Memory Banks
 ```
 
-### 2. Install Dependencies
+### Model Hierarchy
+- **TaikoTransformer**: Base encoder-decoder with positional encoding
+- **PatternAwareTransformer**: Adds learned pattern memory with attention
+- **MultiTaskTaikoTransformer**: Adds difficulty conditioning and multi-task heads
 
-Next, you'll need to install the necessary dependencies. TaikoNation uses a few Python libraries to work its magic. You can install them using pip:
+## Installation
 
 ```bash
+git clone https://github.com/myrqyry/TaikoNationV1.git
+cd TaikoNationV1
 pip install -r requirements.txt
 ```
 
-**Note:** If you don't have a `requirements.txt` file, you can install the dependencies manually:
+### Requirements
+- Python 3.8+
+- PyTorch 1.12+
+- NumPy, SciPy, librosa
+- Flask (for evaluation server)
+- ffmpeg (for audio processing)
 
+## Quick Start
+
+### 1. Training a Model
 ```bash
-pip install google-generativeai numpy essentia pydub
+python train_transformer.py --config config/default.yaml
 ```
 
-You'll also need to install ffmpeg, which is a dependency for pydub. You can find installation instructions for your operating system on the [ffmpeg website](https://ffmpeg.org/download.html).
-
-### 3. Set Up Your Gemini API Key
-
-To use the Gemini-powered prompting feature, you'll need to get a Gemini API key. You can get one from the [Google AI Studio](https://aistudio.google.com/).
-
-Once you have your API key, you'll need to set it as an environment variable named `GEMINI_API_KEY`. You can do this by adding the following line to your `.bashrc` or `.zshrc` file:
-
+### 2. Generating Charts
 ```bash
-export GEMINI_API_KEY="YOUR_API_KEY"
+python generate_chart.py model.pth input_songs/song.npy output_chart.osu --difficulty oni
 ```
 
-Replace `"YOUR_API_KEY"` with your actual API key.
+### 3. Human Evaluation
+```bash
+python tools/human_eval/server.py
+# Open http://localhost:5000 to rate generated charts
+```
 
-## 🎶 Usage
+### 4. API Server
+```bash
+python server.py
+# POST to /generate with audio files
+```
 
-Once you've set up the project, you're ready to start generating charts! Here's how to do it:
+## Configuration
 
-1.  **Place your song in the `input_songs` directory.** Make sure your song is in `.mp3` format.
+All hyperparameters are managed through YAML configuration files:
 
-2.  **Run the `gemini_output.py` script.** Open a terminal in the root directory of the project and run the following command:
+```yaml
+model:
+  d_model: 256
+  nhead: 8
+  num_encoder_layers: 6
+  num_decoder_layers: 6
 
-    ```bash
-    python output/gemini_output.py "input_songs/your_song.mp3" "Your creative prompt"
-    ```
+training:
+  batch_size: 16
+  learning_rate: 5e-5
+  multi_task:
+    difficulty_loss_weight: 0.1
+    pattern_loss_weight: 0.2
 
-    Replace `"input_songs/your_song.mp3"` with the path to your song and `"Your creative prompt"` with your desired prompt for the AI.
+data:
+  max_sequence_length: 2048
+  time_quantization_ms: 100
+```
 
-3.  **Find your chart in the `output` directory.** Once the script has finished running, you'll find a new `.osz` file in the `output` directory. This file contains your generated chart and your song, ready to be imported into osu!
+## Data Format
 
-    **Note:** The first time you run the script for a new song, it will take some time to process the audio and extract the features. Subsequent runs for the same song will be much faster.
+### Input Audio Features
+- Pre-computed spectral features (`.npy` files)
+- Frame rate: ~43Hz (23.2ms resolution)
+- Feature size: 80 dimensions (mel-scale spectrogram)
 
-## 🙌 Contributing
+### Chart Format
+- 7-dimensional vectors: `[don, ka, big_don, big_ka, roll_start, roll_end, finisher]`
+- Boolean encoding for simultaneous events
+- Tokenized using BEaRT-style discrete vocabulary
 
-We love contributions! If you'd like to contribute to TaikoNation, please feel free to fork the repository and submit a pull request. Here are some ideas for how you can contribute:
+## Evaluation Metrics
 
-*   **Improve the model:** The current model is a good starting point, but it can always be improved. If you have experience with deep learning and music information retrieval, we'd love to see what you can do!
-*   **Add new features:** Have an idea for a new feature? We'd love to hear it!
-*   **Improve the documentation:** Good documentation is essential for any project. If you see something that could be clearer or more detailed, please let us know.
-*   **Report bugs:** If you find a bug, please open an issue on GitHub.
+### Quantitative (Automated)
+- **Pattern Overlap**: Percentage of human patterns used
+- **Pattern Space Coverage**: Variety of unique patterns
+- **Note Type Distribution**: Statistical similarity to human charts
+- **Onset Detection**: F1 score for note timing accuracy
 
-We're excited to see what you come up with!
+### Qualitative (Human)
+- **Fun Rating**: Subjective enjoyment (1-10)
+- **Musicality**: How well notes match the music (1-10)
+- **Playability**: Physical comfort and flow (1-10)
+- **Pattern Coherence**: Logical pattern structure (1-10)
+- **Difficulty Accuracy**: Appropriate for target skill level (1-10)
 
-## 📜 License
+## Research Applications
 
-TaikoNation is released under the [MIT License](LICENSE).
+This codebase enables several research directions:
+
+### Implemented
+- **Multi-difficulty conditioning** for skill-appropriate generation
+- **Pattern-aware attention** for musical coherence
+- **Human preference learning** through evaluation pipeline
+
+### Future Directions
+- **Reinforcement Learning from Human Feedback (RLHF)**
+- **Style transfer** between mappers
+- **Cross-game adaptation** (DDR, Guitar Hero, etc.)
+- **Real-time generation** for live performances
+
+## Contributing
+
+We welcome contributions in several areas:
+
+- **Model Architecture**: New attention mechanisms, loss functions
+- **Data Pipeline**: Audio processing, augmentation techniques  
+- **Evaluation**: New metrics, visualization tools
+- **Applications**: Web interfaces, game integrations
+
+## Citation
+
+If you use this work in your research, please cite both the original paper and this implementation:
+
+```bibtex
+@inproceedings{halina2021taikonation,
+  title={TaikoNation: Patterning-focused Chart Generation for Rhythm Action Games},
+  author={Halina, Emily and Guzdial, Matthew},
+  booktitle={Proceedings of the Twelfth Workshop on Procedural Content Generation},
+  year={2021}
+}
+
+@misc{taikonationv1_2025,
+  title={TaikoNationV1: Modern Implementation with Multi-Difficulty and Pattern-Aware Generation},
+  author={[Your Name]},
+  year={2025},
+  url={https://github.com/myrqyry/TaikoNationV1}
+}
+```
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+- **Emily Halina & Matthew Guzdial** for the original TaikoNation research and codebase
+- **The osu!taiko community** for inspiration and feedback
+- **PyTorch and Hugging Face** teams for excellent ML frameworks
+
+***
+
+*"The rhythm is just a click away."* 🥁
