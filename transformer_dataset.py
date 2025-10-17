@@ -12,6 +12,7 @@ from audio_processing import get_audio_features, augment_spectrogram
 # --- Constants ---
 INPUT_CHART_DIR = "input_charts_nr"
 INPUT_SONG_DIR = "input_songs"
+DIFFICULTY_MAP = {"easy": 0, "normal": 1, "hard": 2, "oni": 3, "ura": 4, "unknown": 1}
 
 class TaikoTransformerDataset(Dataset):
     def __init__(self, all_samples, indices, tokenizer, genre_vocab, is_train=True, max_sequence_length=512, time_quantization_ms=100, source_resolution_ms=23.2):
@@ -56,9 +57,10 @@ class TaikoTransformerDataset(Dataset):
         decoder_input = torch.tensor([self.tokenizer.vocab["[CLS]"]] + token_ids[:-1], dtype=torch.long)
         target = torch.tensor(token_ids, dtype=torch.long)
 
+        difficulty_label = torch.tensor(DIFFICULTY_MAP.get(sample.get("difficulty", "unknown").lower(), 1), dtype=torch.long)
         genre_id = torch.tensor(self.genre_vocab.get(sample.get("genre", "unknown"), 0), dtype=torch.long)
 
-        return {"encoder_input": encoder_input, "decoder_input": decoder_input, "target": target, "genre_id": genre_id}
+        return {"encoder_input": encoder_input, "decoder_input": decoder_input, "target": target, "difficulty": difficulty_label, "genre_id": genre_id}
 
 def collate_fn(batch):
     batch = [b for b in batch if b is not None]
@@ -87,11 +89,15 @@ def get_transformer_data_loaders(config, fold_idx=0):
                 if song_filename:
                     genre = genre_labels.get(song_filename, "unknown")
                     genres.add(genre)
+
+                    difficulty_match = re.search(r'\[(.*?)\]', chart_filename)
+                    difficulty = difficulty_match.group(1) if difficulty_match else "unknown"
+
                     all_samples.append({
                         "chart_path": os.path.join(INPUT_CHART_DIR, chart_filename),
                         "song_path": os.path.join(INPUT_SONG_DIR, song_filename),
                         "genre": genre,
-                        "difficulty": re.search(r'\[(.*?)\]', chart_filename).group(1) if re.search(r'\[(.*?)\]', chart_filename) else "unknown"
+                        "difficulty": difficulty
                     })
             except IndexError:
                 continue
