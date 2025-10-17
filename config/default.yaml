@@ -40,3 +40,22 @@ training:
 
 # --- Development Settings ---
 dry_run: false # Set to true to run a quick test with one fold and fewer batches
+
+# --- Reward Model Settings ---
+reward_model:
+  input_size: 256 # Should match the generator's d_model
+  hidden_size: 128
+
+# --- RLHF / PPO Fine-Tuning Settings ---
+rlhf:
+  ppo_epochs: 10
+  ppo_learning_rate: 0.00001
+  clip_epsilon: 0.2
+  # GAE and Adaptive KL settings
+  gamma: 0.99
+  lambda_gae: 0.95
+  adaptive_kl_coeff: true
+  target_kl: 0.1
+  # Rollout settings
+  max_generation_length: 128
+  num_rollouts: 4
