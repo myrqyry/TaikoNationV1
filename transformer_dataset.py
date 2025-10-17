@@ -2,7 +2,9 @@ import os
 import torch
 import numpy as np
 import re
+import json
 from torch.utils.data import Dataset, DataLoader
+from sklearn.model_selection import KFold
 
 from tokenization import TaikoTokenizer
 from audio_processing import get_audio_features, augment_spectrogram
@@ -10,22 +12,14 @@ from audio_processing import get_audio_features, augment_spectrogram
 # --- Constants ---
 INPUT_CHART_DIR = "input_charts_nr"
 INPUT_SONG_DIR = "input_songs"
-TEST_DATA_INDICES = [2, 5, 9, 82, 28, 22, 81, 43, 96, 97]
-
-from sklearn.model_selection import KFold
 
 class TaikoTransformerDataset(Dataset):
-    """
-    A PyTorch Dataset for the Taiko Transformer model.
-    It loads song-chart pairs, processes them into aligned audio features and
-    token sequences, and prepares them for training a sequence-to-sequence model.
-    """
-    def __init__(self, all_samples, indices, is_train=True, max_sequence_length=512, time_quantization_ms=100, source_resolution_ms=23.2):
+    def __init__(self, all_samples, indices, tokenizer, genre_vocab, is_train=True, max_sequence_length=512, time_quantization_ms=100, source_resolution_ms=23.2):
         self.is_train = is_train
         self.max_sequence_length = max_sequence_length
-        self.tokenizer = TaikoTokenizer(time_quantization=time_quantization_ms, source_resolution=source_resolution_ms)
+        self.tokenizer = tokenizer
+        self.genre_vocab = genre_vocab
         self.samples = [all_samples[i] for i in indices]
-        # Store for use in __getitem__
         self.source_resolution_ms = source_resolution_ms
         self.time_quantization_ms = time_quantization_ms
 
@@ -34,155 +28,89 @@ class TaikoTransformerDataset(Dataset):
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
+        audio_features = get_audio_features(sample["song_path"], source_resolution_ms=self.source_resolution_ms, frame_duration_ms=self.time_quantization_ms)
+        if audio_features is None: return None
 
-        # 1. Load and process audio features
-        audio_features = get_audio_features(
-            sample["song_path"],
-            source_resolution_ms=self.source_resolution_ms,
-            frame_duration_ms=self.time_quantization_ms
-        )
-        if audio_features is None:
-            # Return dummy data if audio processing fails
-            return self._get_dummy_item()
-
-        # Apply augmentation only to the training set
         if self.is_train:
             audio_features = augment_spectrogram(audio_features)
 
-        # 2. Load and tokenize chart data
         token_ids = self.tokenizer.tokenize(sample["chart_path"])
-        if not token_ids:
-            return self._get_dummy_item()
+        if not token_ids: return None
 
-        # 3. Align and pad/truncate sequences
         min_len = min(len(audio_features), len(token_ids))
-
         audio_features = audio_features[:min_len]
         token_ids = token_ids[:min_len]
 
-        # Pad or truncate to max_sequence_length
-        # Audio features padding: 0
-        # Token padding: [PAD] token ID
-        pad_token_id = self.tokenizer.vocab["[PAD]"]
-
-        # Pad audio
-        audio_padding_length = self.max_sequence_length - audio_features.shape[0]
-        if audio_padding_length > 0:
-            padding_array = np.zeros((audio_padding_length, audio_features.shape[1]))
-            audio_features = np.vstack([audio_features, padding_array])
+        if audio_features.shape[0] < self.max_sequence_length:
+            padding = np.zeros((self.max_sequence_length - audio_features.shape[0], audio_features.shape[1]))
+            audio_features = np.vstack([audio_features, padding])
         else:
             audio_features = audio_features[:self.max_sequence_length]
 
-        # Pad tokens
-        token_padding_length = self.max_sequence_length - len(token_ids)
-        if token_padding_length > 0:
-            token_ids.extend([pad_token_id] * token_padding_length)
+        if len(token_ids) < self.max_sequence_length:
+            token_ids.extend([self.tokenizer.vocab["[PAD]"]] * (self.max_sequence_length - len(token_ids)))
         else:
             token_ids = token_ids[:self.max_sequence_length]
 
-        # 4. Prepare inputs for the transformer
-        # Encoder input is the audio features
         encoder_input = torch.from_numpy(audio_features).float()
-
-        # Decoder input is the token sequence, shifted right (starts with [CLS])
-        cls_token_id = self.tokenizer.vocab["[CLS]"]
-        decoder_input = torch.tensor([cls_token_id] + token_ids[:-1], dtype=torch.long)
-
-        # Target is the original token sequence
+        decoder_input = torch.tensor([self.tokenizer.vocab["[CLS]"]] + token_ids[:-1], dtype=torch.long)
         target = torch.tensor(token_ids, dtype=torch.long)
 
-        return {
-            "encoder_input": encoder_input,
-            "decoder_input": decoder_input,
-            "target": target
-        }
+        genre_id = torch.tensor(self.genre_vocab.get(sample.get("genre", "unknown"), 0), dtype=torch.long)
 
-    def _get_dummy_item(self):
-        """Returns an empty/dummy item to be filtered out by the collate_fn."""
-        return None
-
+        return {"encoder_input": encoder_input, "decoder_input": decoder_input, "target": target, "genre_id": genre_id}
 
 def collate_fn(batch):
-    """Custom collate function to filter out None (failed) samples."""
     batch = [b for b in batch if b is not None]
-    if not batch:
-        return None
+    if not batch: return None
     return torch.utils.data.dataloader.default_collate(batch)
 
-
 def get_transformer_data_loaders(config, fold_idx=0):
-    """
-    Creates and returns training and testing DataLoaders for a specific
-    cross-validation fold.
-    """
-    # 1. Prepare the full list of samples
-    all_samples = []
+    genre_labels_path = "output/genre_labels.json"
+    if os.path.exists(genre_labels_path):
+        with open(genre_labels_path, 'r') as f:
+            genre_labels = json.load(f)
+    else:
+        genre_labels = {}
+        print("Warning: genre_labels.json not found. Genres will be 'unknown'.")
+
+    all_samples, genres = [], set(["unknown"])
     try:
-        charts = sorted(os.listdir(path=INPUT_CHART_DIR))
-        songs = os.listdir(path=INPUT_SONG_DIR)
+        charts = sorted(os.listdir(INPUT_CHART_DIR))
+        songs = os.listdir(INPUT_SONG_DIR)
         song_map = {s.split()[0]: s for s in songs}
 
         for chart_filename in charts:
             try:
                 id_number = chart_filename.split("_")[0]
-                if id_number in song_map:
-                    # Parse difficulty from filename, e.g., "... [oni].npy"
-                    difficulty_match = re.search(r'\[(.*?)\]', chart_filename)
-                    difficulty = difficulty_match.group(1) if difficulty_match else "unknown"
-
+                song_filename = song_map.get(id_number)
+                if song_filename:
+                    genre = genre_labels.get(song_filename, "unknown")
+                    genres.add(genre)
                     all_samples.append({
                         "chart_path": os.path.join(INPUT_CHART_DIR, chart_filename),
-                        "song_path": os.path.join(INPUT_SONG_DIR, song_map[id_number]),
-                        "difficulty": difficulty
+                        "song_path": os.path.join(INPUT_SONG_DIR, song_filename),
+                        "genre": genre,
+                        "difficulty": re.search(r'\[(.*?)\]', chart_filename).group(1) if re.search(r'\[(.*?)\]', chart_filename) else "unknown"
                     })
             except IndexError:
                 continue
     except FileNotFoundError as e:
         print(f"Error: Input directory not found - {e}.")
-        return None, None, None
+        return None, None, None, None
 
-    print(f"Found a total of {len(all_samples)} samples.")
+    genre_vocab = {name: i for i, name in enumerate(sorted(list(genres)))}
+    print(f"Found {len(all_samples)} samples and {len(genre_vocab)} genres.")
 
-    # 2. Create K-Fold splits
     kf = KFold(n_splits=config['training']['k_folds'], shuffle=True, random_state=42)
-    all_splits = list(kf.split(all_samples))
-    train_indices, val_indices = all_splits[fold_idx]
+    train_indices, val_indices = list(kf.split(all_samples))[fold_idx]
 
-    print(f"Fold {fold_idx + 1}/{config['training']['k_folds']}: {len(train_indices)} train, {len(val_indices)} validation samples.")
-
-    # 3. Create Datasets for the current fold
+    tokenizer = TaikoTokenizer()
     data_config = config['data']
-    train_dataset = TaikoTransformerDataset(
-        all_samples,
-        train_indices,
-        is_train=True,
-        max_sequence_length=data_config['max_sequence_length'],
-        time_quantization_ms=data_config['time_quantization_ms'],
-        source_resolution_ms=data_config['source_resolution_ms']
-    )
-    val_dataset = TaikoTransformerDataset(
-        all_samples,
-        val_indices,
-        is_train=False,
-        max_sequence_length=data_config['max_sequence_length'],
-        time_quantization_ms=data_config['time_quantization_ms'],
-        source_resolution_ms=data_config['source_resolution_ms']
-    )
+    train_dataset = TaikoTransformerDataset(all_samples, train_indices, tokenizer, genre_vocab, is_train=True, max_sequence_length=data_config['max_sequence_length'], time_quantization_ms=data_config['time_quantization_ms'], source_resolution_ms=data_config['source_resolution_ms'])
+    val_dataset = TaikoTransformerDataset(all_samples, val_indices, tokenizer, genre_vocab, is_train=False, max_sequence_length=data_config['max_sequence_length'], time_quantization_ms=data_config['time_quantization_ms'], source_resolution_ms=data_config['source_resolution_ms'])
 
-    # 4. Create DataLoaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config['training']['batch_size'],
-        shuffle=True,
-        num_workers=2,
-        collate_fn=collate_fn
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config['training']['batch_size'],
-        shuffle=False,
-        num_workers=2,
-        collate_fn=collate_fn
-    )
-    # Return the tokenizer from one of the datasets (they are identical)
-    return train_loader, val_loader, train_dataset.tokenizer
+    train_loader = DataLoader(train_dataset, batch_size=config['training']['batch_size'], shuffle=True, num_workers=2, collate_fn=collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=config['training']['batch_size'], shuffle=False, num_workers=2, collate_fn=collate_fn)
+
+    return train_loader, val_loader, tokenizer, genre_vocab
