@@ -1,28 +1,84 @@
-# Python
+# ====================
+# TaikoNationV1 - .gitignore
+# Cleaned, organized, and deduplicated
+# ====================
+
+# ----- Python artifacts -----
 __pycache__/
+*.py[cod]
 *.pyc
 *.pyo
 *.pyd
 .Python
-env/
+
+# Byte-compiled / optimized / DLL files
+*$py.class
+
+# Virtual environments
+.venv/
 venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# pip / build
 pip-wheel-metadata/
-.eggs/
+build/
+dist/
 *.egg-info/
 *.egg
 
-# Build artifacts
-build/
-dist/
+# C extensions
 *.so
 
-# IDE / Editor
+# ----- Packaging / installer logs -----
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ----- Test / coverage -----
+.tox/
+.nox/
+.coverage
+.coverage.*
+.pytest_cache/
+htmlcov/
+coverage.xml
+
+# ----- Type checking caches -----
+.mypy_cache/
+.pyright/
+
+# ----- Editor / IDE -----
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# Machine Learning
+# ----- OS files -----
+.DS_Store
+
+# ----- Logs / runtime outputs -----
+*.log
+logs/
+server.out
+server_fastapi.out
+nohup.out
+uvicorn.log
+
+# ----- Notebooks -----
+.ipynb_checkpoints/
+
+# ----- Local env files -----
+.env
+.env.*
+
+# ----- Databases -----
+*.sqlite3
+*.db
+
+# ----- Machine learning artifacts -----
+# (Uncomment or add large model directories if you want to ignore them)
 *.pth
 *.pt
 *.tfl
@@ -31,4 +87,9 @@ wandb/
 output/
 dummy_*.npy
 dummy_*.wav
-.ipynb_checkpoints/
+
+# Optional (commented): large folders you may want to ignore
+# /model/
+# /output/
+# /input_songs/
+# /input_charts_nr/

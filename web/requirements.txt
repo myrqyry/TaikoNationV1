@@ -1,0 +1,26 @@
+# TaikoNation Studio Web Interface Requirements
+
+# Core web framework
+Flask==2.3.3
+Flask-SocketIO==5.3.6
+
+# Audio processing (uses existing TaikoNation dependencies)
+librosa==0.10.1
+numpy>=1.21.0
+scipy>=1.7.0
+
+# Machine learning (PyTorch - matches existing requirements)
+torch>=1.12.0
+torchaudio>=0.12.0
+
+# Configuration and data handling
+PyYAML>=6.0
+python-socketio>=5.8.0
+
+# Development and logging
+python-dotenv==1.0.0
+eventlet==0.33.3
+fastapi==0.95.2
+uvicorn[standard]==0.22.0
+python-socketio[asyncio]==5.9.0
+aiofiles==23.1.0
