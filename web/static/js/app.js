@@ -1,12 +1,47 @@
 // TaikoNation Studio JavaScript Application
 
+class StateManager {
+    constructor() {
+        this.state = {
+            training: { active: false, progress: 0, metrics: {} },
+            generation: { active: false, progress: 0 },
+            charts: [],
+            models: {},
+            logs: [],
+            system: { status: 'initializing', message: 'Connecting...' }
+        };
+        this.listeners = {};
+    }
+
+    setState(key, value) {
+        this.state[key] = { ...this.state[key], ...value };
+        this.notifyListeners(key);
+    }
+
+    getState(key) {
+        return this.state[key];
+    }
+
+    subscribe(key, callback) {
+        if (!this.listeners[key]) {
+            this.listeners[key] = [];
+        }
+        this.listeners[key].push(callback);
+    }
+
+    notifyListeners(key) {
+        if (this.listeners[key]) {
+            this.listeners[key].forEach(callback => callback(this.state[key]));
+        }
+    }
+}
+
 class TaikoNationApp {
     constructor() {
         this.currentPage = 'dashboard';
         this.apiBase = '/api';
         this.wsConnection = null;
-        this.trainingActive = false;
-        this.generationActive = false;
+        this.stateManager = new StateManager();
         
         this.init();
     }
@@ -14,16 +49,13 @@ class TaikoNationApp {
     async init() {
         console.log('Initializing TaikoNation Studio...');
         
-        // Set up event listeners
+        this.stateManager.subscribe('system', this.updateSystemStatus.bind(this));
+        this.stateManager.subscribe('training', this.renderTrainingProgress.bind(this));
+        this.stateManager.subscribe('generation', this.renderGenerationProgress.bind(this));
+
         this.setupEventListeners();
-        
-        // Connect to backend
         await this.connectToBackend();
-        
-        // Load initial data
         await this.loadDashboardData();
-        
-        // Set up WebSocket for real-time updates
         this.setupWebSocket();
         
         console.log('TaikoNation Studio initialized successfully');
@@ -91,14 +123,14 @@ class TaikoNationApp {
             const response = await fetch(`${this.apiBase}/status`);
             if (response.ok) {
                 const status = await response.json();
-                this.updateSystemStatus('connected', 'System Ready');
+                this.stateManager.setState('system', { status: 'connected', message: 'System Ready' });
                 console.log('Backend connection established:', status);
             } else {
                 throw new Error('Backend not responding');
             }
         } catch (error) {
             console.error('Failed to connect to backend:', error);
-            this.updateSystemStatus('error', 'Backend Unavailable');
+            this.stateManager.setState('system', { status: 'error', message: 'Backend Unavailable' });
         }
     }
 
@@ -117,11 +149,19 @@ class TaikoNationApp {
             });
 
             this.socket.on('training_progress', (data) => {
-                this.updateTrainingProgress(data.progress, data.metrics);
+                this.stateManager.setState('training', { active: true, progress: data.progress, metrics: data.metrics });
+                if (data.progress >= 100) {
+                    this.stateManager.setState('training', { active: false });
+                    this.addSystemLog('success', 'Training completed successfully');
+                }
             });
 
             this.socket.on('generation_progress', (data) => {
-                this.updateGenerationProgress(data.progress);
+                this.stateManager.setState('generation', { active: true, progress: data.progress });
+                if (data.progress >= 100) {
+                    this.stateManager.setState('generation', { active: false });
+                    this.addSystemLog('success', 'Chart generated successfully');
+                }
             });
 
             this.socket.on('system_log', (log) => {
@@ -163,7 +203,7 @@ class TaikoNationApp {
         }
     }
 
-    updateSystemStatus(status, message) {
+    updateSystemStatus({ status, message }) {
         const statusDot = document.getElementById('statusDot');
         const statusText = document.getElementById('statusText');
         
@@ -338,8 +378,7 @@ class TaikoNationApp {
         const formData = new FormData(form);
         
         try {
-            this.trainingActive = true;
-            this.showTrainingProgress();
+            this.stateManager.setState('training', { active: true, progress: 0, metrics: {} });
             
             const response = await fetch(`${this.apiBase}/start-training`, {
                 method: 'POST',
@@ -354,8 +393,7 @@ class TaikoNationApp {
         } catch (error) {
             console.error('Training error:', error);
             this.addSystemLog('error', `Training failed: ${error.message}`);
-            this.trainingActive = false;
-            this.hideTrainingProgress();
+            this.stateManager.setState('training', { active: false });
         }
     }
 
@@ -373,26 +411,21 @@ class TaikoNationApp {
         }
     }
 
-    updateTrainingProgress(progress, metrics) {
+    renderTrainingProgress({ active, progress, metrics }) {
+        if (!active) {
+            this.hideTrainingProgress();
+            return;
+        }
+        this.showTrainingProgress();
+
         const progressBar = document.getElementById('trainingProgressBar');
         const progressText = document.getElementById('trainingProgressText');
-        const metricsContainer = document.getElementById('trainingMetrics');
         
-        if (progressBar) {
-            progressBar.style.width = `${progress}%`;
-        }
+        if (progressBar) progressBar.style.width = `${progress}%`;
+        if (progressText) progressText.textContent = `${progress}% Complete`;
         
-        if (progressText) {
-            progressText.textContent = `${progress}% Complete`;
-        }
-        
-        if (metricsContainer && metrics) {
+        if (metrics) {
             this.updateTrainingMetrics(metrics);
-        }
-        
-        if (progress >= 100) {
-            this.trainingActive = false;
-            this.addSystemLog('success', 'Training completed successfully');
         }
     }
 
@@ -424,8 +457,7 @@ class TaikoNationApp {
             });
             
             if (response.ok) {
-                this.trainingActive = false;
-                this.hideTrainingProgress();
+                this.stateManager.setState('training', { active: false, progress: 0, metrics: {} });
                 this.addSystemLog('info', 'Training stopped by user');
             }
         } catch (error) {
@@ -439,8 +471,7 @@ class TaikoNationApp {
         const formData = new FormData(form);
         
         try {
-            this.generationActive = true;
-            this.showGenerationProgress();
+            this.stateManager.setState('generation', { active: true, progress: 0 });
             
             const response = await fetch(`${this.apiBase}/generate-chart`, {
                 method: 'POST',
@@ -448,18 +479,14 @@ class TaikoNationApp {
             });
             
             if (response.ok) {
-                const result = await response.json();
                 this.addSystemLog('success', 'Chart generation started');
-                
-                // The progress will be updated via WebSocket
             } else {
                 throw new Error(`Generation failed: ${response.statusText}`);
             }
         } catch (error) {
             console.error('Generation error:', error);
             this.addSystemLog('error', `Chart generation failed: ${error.message}`);
-            this.generationActive = false;
-            this.hideGenerationProgress();
+            this.stateManager.setState('generation', { active: false });
         }
     }
 
@@ -477,17 +504,16 @@ class TaikoNationApp {
         }
     }
 
-    updateGenerationProgress(progress) {
+    renderGenerationProgress({ active, progress }) {
+        if (!active) {
+            this.hideGenerationProgress();
+            return;
+        }
+        this.showGenerationProgress();
+
         const progressBar = document.getElementById('generationProgressBar');
-        
         if (progressBar) {
             progressBar.style.width = `${progress}%`;
-        }
-        
-        if (progress >= 100) {
-            this.generationActive = false;
-            this.hideGenerationProgress();
-            this.addSystemLog('success', 'Chart generated successfully');
         }
     }
 

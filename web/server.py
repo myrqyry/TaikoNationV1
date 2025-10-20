@@ -16,9 +16,14 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
+from concurrent.futures import ThreadPoolExecutor
+import uuid
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 from flask import Flask, request, jsonify, render_template, send_from_directory
 from flask_socketio import SocketIO, emit
+from marshmallow import Schema, fields, ValidationError
 from werkzeug.utils import secure_filename
 
 # Import existing TaikoNation modules
@@ -102,6 +107,29 @@ def add_security_headers(response):
     response.headers['Content-Security-Policy'] = "default-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com"
     return response
 
+
+# Marshmallow Schemas for Input Validation
+class ChartGenerationSchema(Schema):
+    title = fields.Str(load_default="Untitled", validate=lambda x: len(x) <= 200)
+    artist = fields.Str(load_default="Unknown", validate=lambda x: len(x) <= 200)
+    bpm = fields.Int(load_default=120, validate=lambda x: 60 <= x <= 300)
+    genre = fields.Str(load_default="electronic")
+    difficulty = fields.Str(
+        load_default="oni",
+        validate=lambda x: x in ["kantan", "futsuu", "muzukashii", "oni", "ura"],
+    )
+    pattern_style = fields.Str(load_default="balanced")
+
+
+class TrainingSchema(Schema):
+    d_model = fields.Int(load_default=256)
+    nhead = fields.Int(load_default=8)
+    num_encoder_layers = fields.Int(load_default=6)
+    num_decoder_layers = fields.Int(load_default=6)
+    learning_rate = fields.Float(load_default=0.0001)
+    batch_size = fields.Int(load_default=8)
+
+
 # Global variables for managing training and generation state
 training_process = None
 generation_queue = []
@@ -109,6 +137,38 @@ system_logs = []
 active_models = {}
 generated_charts = []
 evaluation_queue = []
+
+
+class TaskManager:
+    def __init__(self, max_workers=2):
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+        self.active_tasks = {}
+
+    def submit_task(self, fn, *args, **kwargs):
+        task_id = str(uuid.uuid4())
+        future = self.executor.submit(fn, *args, **kwargs)
+        self.active_tasks[task_id] = future
+        return task_id
+
+    def get_task_status(self, task_id):
+        if task_id in self.active_tasks:
+            future = self.active_tasks[task_id]
+            if future.done():
+                return "completed"
+            elif future.running():
+                return "running"
+            elif future.cancelled():
+                return "cancelled"
+        return "not_found"
+
+    def cancel_task(self, task_id):
+        if task_id in self.active_tasks:
+            future = self.active_tasks[task_id]
+            if future.running():
+                future.cancel()
+                del self.active_tasks[task_id]
+                return True
+        return False
 
 # Configuration
 UPLOAD_FOLDER = '../input_songs'
@@ -129,9 +189,11 @@ class TaikoNationServer:
         self.models = {}
         self.training_active = False
         self.generation_active = False
-        
+        self.task_manager = TaskManager()
+
         self.initialize_components()
-    
+        self.setup_config_watcher()
+
     def load_default_config(self) -> Dict[str, Any]:
         """Load the default configuration from config/default.yaml."""
         try:
@@ -165,6 +227,12 @@ class TaikoNationServer:
                 'save_path': '../output/taiko_transformer.pth'
             }
         }
+
+    def reload_config(self):
+        """Reload the configuration from the default.yaml file."""
+        logger.info("Configuration file changed, reloading...")
+        self.config = self.load_default_config()
+        self.add_system_log("info", "Configuration reloaded automatically.")
     
     def initialize_components(self):
         """Initialize TaikoNation components."""
@@ -231,8 +299,27 @@ class TaikoNationServer:
         
         logger.info(f"[{level.upper()}] {message}")
 
+class ConfigWatcher(FileSystemEventHandler):
+    def __init__(self, server_instance):
+        self.server = server_instance
+
+    def on_modified(self, event):
+        if event.src_path.endswith("default.yaml"):
+            self.server.reload_config()
+
+def setup_config_watcher(self):
+    event_handler = ConfigWatcher(self)
+    self.observer = Observer()
+    self.observer.schedule(event_handler, CONFIG_FOLDER, recursive=False)
+    self.observer.start()
+
+
+TaikoNationServer.setup_config_watcher = setup_config_watcher
+
+
 # Create server instance
 server = TaikoNationServer()
+
 
 # Route handlers
 @app.route('/')
@@ -325,16 +412,10 @@ def api_upload_audio():
 def api_start_training():
     """Start model training."""
     try:
-        # Get training parameters from form
-        training_params = {
-            'd_model': int(request.form.get('d_model', 256)),
-            'nhead': int(request.form.get('nhead', 8)),
-            'num_encoder_layers': int(request.form.get('num_encoder_layers', 6)),
-            'num_decoder_layers': int(request.form.get('num_decoder_layers', 6)),
-            'learning_rate': float(request.form.get('learning_rate', 0.0001)),
-            'batch_size': int(request.form.get('batch_size', 8))
-        }
-        
+        # Validate training parameters
+        schema = TrainingSchema()
+        training_params = schema.load(request.form)
+
         # Start training in background
         start_background_training(training_params)
         
@@ -342,6 +423,9 @@ def api_start_training():
         
         return jsonify({'success': True, 'message': 'Training started'})
         
+    except ValidationError as err:
+        logger.warning(f"Invalid training parameters: {err.messages}")
+        return jsonify({"error": err.messages}), 400
     except Exception as e:
         logger.error(f"Training start error: {e}")
         server.add_system_log('error', f'Training start failed: {str(e)}')
@@ -368,16 +452,10 @@ def api_stop_training():
 def api_generate_chart():
     """Generate a chart from uploaded audio."""
     try:
-        # Get generation parameters
-        params = {
-            'title': request.form.get('title', 'Untitled'),
-            'artist': request.form.get('artist', 'Unknown'),
-            'bpm': int(request.form.get('bpm', 120)),
-            'genre': request.form.get('genre', 'electronic'),
-            'difficulty': request.form.get('difficulty', 'oni'),
-            'pattern_style': request.form.get('pattern_style', 'balanced')
-        }
-        
+        # Validate generation parameters
+        schema = ChartGenerationSchema()
+        params = schema.load(request.form)
+
         # Start chart generation
         start_chart_generation(params)
         
@@ -385,6 +463,9 @@ def api_generate_chart():
         
         return jsonify({'success': True, 'message': 'Chart generation started'})
         
+    except ValidationError as err:
+        logger.warning(f"Invalid chart generation parameters: {err.messages}")
+        return jsonify({"error": err.messages}), 400
     except Exception as e:
         logger.error(f"Chart generation error: {e}")
         server.add_system_log('error', f'Chart generation failed: {str(e)}')
@@ -505,9 +586,8 @@ def start_background_training(params: Dict[str, Any]):
     global training_process
     server.training_active = True
     
-    # In a real implementation, you would start the actual training process
-    # For now, simulate training progress
-    def simulate_training():
+    def training_task():
+        """Simulates a training process."""
         for progress in range(0, 101, 5):
             if not server.training_active:
                 break
@@ -523,14 +603,12 @@ def start_background_training(params: Dict[str, Any]):
                 'progress': progress,
                 'metrics': metrics
             })
-            
-            socketio.sleep(2)  # Simulate processing time
+            socketio.sleep(2)
         
         server.training_active = False
         server.add_system_log('success', 'Training completed successfully')
-    
-    # Start training simulation in background
-    socketio.start_background_task(simulate_training)
+
+    server.task_manager.submit_task(training_task)
 
 
 def lazy_load_training_utils():
@@ -546,7 +624,8 @@ def start_chart_generation(params: Dict[str, Any]):
     """Start chart generation process."""
     server.generation_active = True
     
-    def simulate_generation():
+    def generation_task():
+        """Simulates the chart generation process."""
         for progress in range(0, 101, 10):
             if not server.generation_active:
                 break
@@ -554,7 +633,6 @@ def start_chart_generation(params: Dict[str, Any]):
             socketio.emit('generation_progress', {'progress': progress})
             socketio.sleep(1)
         
-        # Add generated chart to library
         chart = {
             'id': len(generated_charts) + 1,
             'title': params['title'],
@@ -572,8 +650,8 @@ def start_chart_generation(params: Dict[str, Any]):
         
         server.generation_active = False
         socketio.emit('chart_generated', {'chart': chart})
-    
-    socketio.start_background_task(simulate_generation)
+
+    server.task_manager.submit_task(generation_task)
 
 def process_evaluation(evaluation_data: Dict[str, Any]):
     """Process submitted evaluation data."""
@@ -614,14 +692,18 @@ if __name__ == '__main__':
     print(f"Server will be available at: http://localhost:5000")
     print(f"Make sure you're running from the web/ directory inside TaikoNationV1/")
     
-    # Run the Flask-SocketIO server
-    # For development we allow Werkzeug when explicitly enabled via env var.
-    allow_unsafe = os.environ.get('TAIKONATION_ALLOW_UNSAFE_WERKZEUG', 'true').lower() in ('1', 'true', 'yes')
-    socketio.run(
-        app,
-        host='127.0.0.1',
-        port=5000,
-        debug=True,
-        use_reloader=False,  # Disable reloader to prevent issues with background tasks
-        allow_unsafe_werkzeug=allow_unsafe
-    )
+    try:
+        # Run the Flask-SocketIO server
+        allow_unsafe = os.environ.get('TAIKONATION_ALLOW_UNSAFE_WERKZEUG', 'true').lower() in ('1', 'true', 'yes')
+        socketio.run(
+            app,
+            host='127.0.0.1',
+            port=5000,
+            debug=True,
+            use_reloader=False,  # Disable reloader to prevent issues with background tasks
+            allow_unsafe_werkzeug=allow_unsafe
+        )
+    finally:
+        if hasattr(server, 'observer') and server.observer.is_alive():
+            server.observer.stop()
+            server.observer.join()

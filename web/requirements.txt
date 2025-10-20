@@ -24,3 +24,5 @@ fastapi==0.95.2
 uvicorn[standard]==0.22.0
 python-socketio[asyncio]==5.9.0
 aiofiles==23.1.0
+marshmallow==3.20.1
+watchdog==3.0.0
