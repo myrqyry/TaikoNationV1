@@ -934,6 +934,16 @@ function exportResearchDataset() {
     }
 }
 
+// Backwards-compatible wrapper used by index.html "Export All" button
+function exportAllCharts() {
+    // Reuse the research dataset export endpoint for a full export
+    if (window.taikoApp) {
+        window.open('/api/research/export-dataset');
+    } else {
+        window.open('/api/research/export-dataset');
+    }
+}
+
 // Initialize the application when DOM is loaded
 document.addEventListener('DOMContentLoaded', () => {
     window.taikoApp = new TaikoNationApp();

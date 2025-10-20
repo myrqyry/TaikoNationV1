@@ -103,8 +103,16 @@ def add_security_headers(response):
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'no-referrer-when-downgrade'
-    # Minimal CSP - adjust for your CDN or external assets
-    response.headers['Content-Security-Policy'] = "default-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com"
+    # Content Security Policy: relaxed for development to allow common external assets.
+    # Adjust/remove external hosts for production deployments.
+    csp = (
+        "default-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
+        "img-src 'self' data: blob: https://cdnjs.cloudflare.com; "
+        "font-src 'self' data: https://r2cdn.perplexity.ai https://cdnjs.cloudflare.com; "
+        "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
+        "connect-src 'self' ws: wss: https://cdnjs.cloudflare.com;"
+    )
+    response.headers['Content-Security-Policy'] = csp
     return response
 
 
@@ -170,15 +178,19 @@ class TaskManager:
                 return True
         return False
 
-# Configuration
-UPLOAD_FOLDER = '../input_songs'
-CHART_OUTPUT_FOLDER = '../output'
-CONFIG_FOLDER = '../config'
-MODEL_FOLDER = '../model'
+# Resolve folders relative to the repository root (two levels up from web/)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+UPLOAD_FOLDER = os.path.join(BASE_DIR, 'input_songs')
+CHART_OUTPUT_FOLDER = os.path.join(BASE_DIR, 'output')
+CONFIG_FOLDER = os.path.join(BASE_DIR, 'config')
+MODEL_FOLDER = os.path.join(BASE_DIR, 'model')
 
-# Ensure directories exist
-for folder in [UPLOAD_FOLDER, CHART_OUTPUT_FOLDER]:
-    os.makedirs(folder, exist_ok=True)
+# Ensure directories exist (create if missing) for upload/output; config may be optional
+for folder in [UPLOAD_FOLDER, CHART_OUTPUT_FOLDER, MODEL_FOLDER]:
+    try:
+        os.makedirs(folder, exist_ok=True)
+    except Exception:
+        logger.warning(f"Could not create or access folder: {folder}")
 
 
 class ExperimentTracker:
@@ -493,10 +505,18 @@ class ConfigWatcher(FileSystemEventHandler):
             self.server.reload_config()
 
 def setup_config_watcher(self):
-    event_handler = ConfigWatcher(self)
-    self.observer = Observer()
-    self.observer.schedule(event_handler, CONFIG_FOLDER, recursive=False)
-    self.observer.start()
+    # Only start the config watcher if the configuration folder exists and is accessible.
+    if os.path.exists(CONFIG_FOLDER) and os.path.isdir(CONFIG_FOLDER):
+        try:
+            event_handler = ConfigWatcher(self)
+            self.observer = Observer()
+            self.observer.schedule(event_handler, CONFIG_FOLDER, recursive=False)
+            self.observer.start()
+            logger.info(f"Config watcher started for {CONFIG_FOLDER}")
+        except Exception as e:
+            logger.warning(f"Failed to start config watcher: {e}")
+    else:
+        logger.warning(f"Config folder not found at {CONFIG_FOLDER}; config watcher disabled.")
 
 
 TaikoNationServer.setup_config_watcher = setup_config_watcher
@@ -508,6 +528,7 @@ server = TaikoNationServer()
 @app.route('/api/research/experiments')
 def get_experiment_history():
     """Return detailed experiment tracking for research analysis"""
+    logger.info(f"GET /api/research/experiments from {request.remote_addr} headers={dict(request.headers)}")
     return jsonify({
         'experiments': server.experiment_tracker.get_all_experiments(),
         'model_comparisons': server.get_model_comparison_data(),
@@ -524,7 +545,11 @@ def export_research_dataset():
         'model_configurations': server.get_model_configs(),
         'audio_features': server.get_processed_audio_features()
     }
-    return send_file(create_research_archive(dataset))
+    # create_research_archive now returns (BytesIO, filename, mimetype).
+    # Call send_file once here to return a proper Flask response.
+    buf, filename, mimetype = create_research_archive(dataset)
+    buf.seek(0)
+    return send_file(buf, mimetype=mimetype, as_attachment=True, download_name=filename)
 
 
 # Route handlers
@@ -536,10 +561,27 @@ def index():
 @app.route('/static/<path:filename>')
 def static_files(filename):
     """Serve static files."""
+    # Serve static assets from the 'static' folder. If the file is missing,
+    # log a warning and return a 404 (avoids unhelpful stack traces in logs).
+    static_path = os.path.join(os.path.dirname(__file__), 'static', filename)
+    if not os.path.exists(static_path):
+        logger.warning(f"Static file not found: {static_path}")
+        return ('', 404)
+
     response = send_from_directory('static', filename)
     # Encourage caching of static assets; in production you'd use far-future headers with hashed filenames
     response.cache_control.max_age = 3600
     return response
+
+
+@app.route('/favicon.ico')
+def favicon():
+    """Serve favicon if present; otherwise return 204 No Content to avoid 404 errors in browser console."""
+    fav_path = os.path.join(os.path.dirname(__file__), 'static', 'favicon.ico')
+    if os.path.exists(fav_path):
+        return send_from_directory('static', 'favicon.ico')
+    logger.info('favicon.ico requested but not found; returning 204')
+    return ('', 204)
 
 @app.route('/api/status')
 def api_status():
@@ -776,24 +818,53 @@ def process_uploaded_audio(filepath: str) -> Dict[str, Any]:
     """Process uploaded audio file and extract features."""
     try:
         # Load audio using librosa
-        y, sr = librosa.load(filepath)
+        # Try to load with original sampling rate to preserve tempo info
+        y, sr = librosa.load(filepath, sr=None)
 
         # Extract basic information
-        duration = len(y) / sr
+        duration = len(y) / float(sr) if sr and len(y) else 0.0
 
-        # Estimate BPM
-        tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+        # Robust BPM estimation: try multiple methods and fallbacks
+        tempo_val = None
+        try:
+            # librosa.beat.tempo returns an array of tempi (autocorrelation-based)
+            est = librosa.beat.tempo(y=y, sr=sr)
+            if hasattr(est, '__len__') and len(est) > 0:
+                tempo_val = float(est[0])
+            else:
+                tempo_val = float(est)
+        except Exception:
+            tempo_val = None
 
-        # Extract audio features for the model
-        features = get_audio_features(
-            filepath,
-            source_resolution_ms=server.config['data']['source_resolution_ms'],
-            frame_duration_ms=server.config['data']['time_quantization_ms']
-        )
+        if tempo_val is None:
+            try:
+                # beat_track returns tempo and beat frames
+                tempo_bt, _ = librosa.beat.beat_track(y=y, sr=sr)
+                tempo_val = float(tempo_bt)
+            except Exception:
+                tempo_val = None
+
+        # Ensure tempo is reasonable; otherwise set to None
+        if tempo_val is not None:
+            if tempo_val <= 0 or tempo_val > 1000:
+                tempo_val = None
+
+        # Extract audio features for the model (may return None on error)
+        features = None
+        try:
+            features = get_audio_features(
+                filepath,
+                source_resolution_ms=server.config['data']['source_resolution_ms'],
+                frame_duration_ms=server.config['data']['time_quantization_ms']
+            )
+        except Exception as e:
+            logger.warning(f"Feature extraction failed for {filepath}: {e}")
+
+        logger.info(f"Processed audio {os.path.basename(filepath)} duration={duration:.2f}s detected_bpm={tempo_val}")
 
         return {
             'duration': duration,
-            'bpm': int(tempo),
+            'bpm': int(tempo_val) if tempo_val is not None else None,
             'features_extracted': features is not None,
             'feature_shape': features.shape if features is not None else None
         }
@@ -927,18 +998,58 @@ def calculate_average_rating() -> float:
 
 import io
 import zipfile
+import socket
 
 def create_research_archive(dataset):
-    """Create a research archive."""
+    """Create a research archive.
+
+    Returns a tuple: (BytesIO_buffer, filename, mimetype). Caller should
+    call Flask's send_file exactly once on the returned buffer.
+    """
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
         zip_file.writestr("dataset.json", json.dumps(dataset).encode())
     zip_buffer.seek(0)
-    return send_file(zip_buffer, mimetype='application/zip', as_attachment=True, download_name='research_dataset.zip')
+    return zip_buffer, 'research_dataset.zip', 'application/zip'
 
 if __name__ == '__main__':
+    # Determine port from environment or first CLI arg (useful for avoiding conflicts)
+    default_port = int(os.environ.get('TAIKONATION_PORT', 5000))
+    cli_port = None
+    try:
+        if len(sys.argv) > 1 and sys.argv[1].isdigit():
+            cli_port = int(sys.argv[1])
+    except Exception:
+        cli_port = None
+
+    port_to_use = cli_port or default_port
+
+    def _is_port_free(host: str, port: int) -> bool:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            # Use SO_REUSEADDR to avoid TIME_WAIT issues on rapid restarts
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((host, port))
+            s.close()
+            return True
+        except OSError:
+            try:
+                s.close()
+            except Exception:
+                pass
+            return False
+
+    # Force the server to use the requested fixed port (7410 by default)
+    # If it's in use, log a warning and still attempt to bind so the user sees the failure.
+    # The user explicitly requested a fixed port rather than a random fallback.
+    FIXED_PORT = 7410
+    # Allow CLI or env var to override, but default to FIXED_PORT when not provided
+    port_to_use = cli_port or int(os.environ.get('TAIKONATION_PORT', FIXED_PORT))
+    if not _is_port_free('127.0.0.1', port_to_use):
+        logger.warning(f"Requested port {port_to_use} appears to be in use. The server will still try to bind and may fail.")
+
     print("Starting TaikoNation Studio Web Server...")
-    print(f"Server will be available at: http://localhost:5000")
+    print(f"Server will be available at: http://localhost:{port_to_use}")
     print(f"Make sure you're running from the web/ directory inside TaikoNationV1/")
 
     try:
@@ -947,7 +1058,7 @@ if __name__ == '__main__':
         socketio.run(
             app,
             host='127.0.0.1',
-            port=5000,
+            port=port_to_use,
             debug=True,
             use_reloader=False,  # Disable reloader to prevent issues with background tasks
             allow_unsafe_werkzeug=allow_unsafe
