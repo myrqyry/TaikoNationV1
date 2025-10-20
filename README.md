@@ -1,187 +1,124 @@
-# TaikoNationV1: AI-Powered Taiko Chart Generation
+# TaikoNationV1 (myrqyry fork)
 
-for generating human-like Taiko no Tatsujin beatmaps from audio, with multi-difficulty support and pattern-aware intelligence.
+_A cutting-edge AI system for human-like Taiko no Tatsujin beatmap generation — now with a full-featured web interface, modern transformer architecture, and integrated human evaluation._
 
 ## Overview
 
-TaikoNationV1 is a modernized implementation of the groundbreaking research from [**"TaikoNation: Patterning-focused Chart Generation for Rhythm Action Games"**](https://arxiv.org/abs/2107.12506) by Emily Halina and Matthew Guzdial (2021). This project extends the original work with state-of-the-art transformer architecture, multi-difficulty generation, and human-in-the-loop evaluation.
+TaikoNationV1 is the modern successor to the influential research of ["TaikoNation: Patterning-focused Chart Generation for Rhythm Action Games"](https://arxiv.org/abs/2107.12506) by Emily Halina and Matthew Guzdial. This project extends the original system with advanced transformer models, pattern-aware memory, multi-difficulty control, and a production-ready web/UI layer for both experimentation and real-world use.
 
-### What Makes This Special
-
-Unlike traditional onset-detection approaches, TaikoNation focuses on **human-like patterning** - creating charts where note placement forms musically coherent patterns that feel natural to play. This implementation takes that core innovation and enhances it with modern AI techniques.
+***
 
 ## Key Features
 
-### 🎯 **Multi-Difficulty Generation**
-- Generate charts for any difficulty: Easy, Normal, Hard, Oni, Ura Oni
-- Difficulty-aware pattern memory learns appropriate patterns for each skill level
-- Smooth difficulty progression for educational use
+- **Multi-difficulty chart generation:** Fully supports Easy, Normal, Hard, Oni, and Ura Oni levels
+- **Pattern-aware intelligence:** Pattern memory and sliding window loss produce musically natural, human-like chart patterns
+- **Modern deep learning architecture:** Transformer with attention, positional encoding, difficulty conditioning, and multi-task heads
+- **Integrated web interface:** Accessible dashboard, drag-and-drop audio/chart upload, real-time progress display, and human-in-the-loop chart feedback system
+- **Data pipeline for RLHF:** Collect and use human preferences to further improve models
+- **Export formats:** Generate .osu and .tja files, compatible with osu!taiko and simulators
+- **RESTful API & batch CLI:** For seamless automation and platform integration
 
-### 🧠 **Pattern-Aware Intelligence**
-- **Sliding window loss** ensures local pattern coherence
-- **Pattern memory attention** learns and reuses common rhythmic motifs
-- **Multi-task learning** optimizes for both note accuracy and difficulty consistency
+***
 
-### 🔄 **Human-in-the-Loop Evaluation**
-- Built-in web server for collecting human ratings
-- Multi-criteria evaluation: Fun, Musicality, Playability, Pattern Coherence
-- Data pipeline for reinforcement learning from human feedback (RLHF)
+## Live Demo & Gallery
 
-### 🚀 **Production Ready**
-- CLI tool for batch generation
-- Export to `.osu` and `.tja` formats
-- RESTful API server for web integration
-- Comprehensive configuration management
+- Try the web interface locally: Open http://localhost:5000 after setup
+- Evaluate and rate charts in-browser, and see pattern visualizations (see screenshots and videos in `/web/README`)
 
-## Research Foundation
-
-This work builds on the original TaikoNation paper's key insights:
-
-> *"Patterning is a key identifier of high quality rhythm game content, seen as a necessary component in human rankings. We establish a new approach for chart generation that produces charts with more congruent, human-like patterning than seen in prior work."*
-
-**Original Contributions (Halina & Guzdial, 2021):**
-- Sliding window prediction for pattern continuity
-- Curated high-difficulty training data
-- Pattern overlap and pattern space coverage metrics
-
-**Our Extensions (2025):**
-- Modern transformer architecture with attention mechanisms
-- Difficulty-conditioned generation with separate pattern memories
-- Real-time human evaluation and preference learning
-- Multi-task learning framework
-- Production-ready deployment pipeline
-
-## Architecture
-
-```
-Audio Features → Encoder → Pattern-Aware → Multi-Task → Chart Tokens
-                          Transformer     Heads      
-                               ↓
-                     Difficulty-Specific
-                     Pattern Memory Banks
-```
-
-### Model Hierarchy
-- **TaikoTransformer**: Base encoder-decoder with positional encoding
-- **PatternAwareTransformer**: Adds learned pattern memory with attention
-- **MultiTaskTaikoTransformer**: Adds difficulty conditioning and multi-task heads
+***
 
 ## Installation
+
+### Prerequisites
+
+- Python 3.8+
+- PyTorch 1.12+
+- NumPy, SciPy, librosa, Flask
+- (Optional: ffmpeg, TensorFlow, CUDA for max speed)
+
+### Project Setup
 
 ```bash
 git clone https://github.com/myrqyry/TaikoNationV1.git
 cd TaikoNationV1
 pip install -r requirements.txt
+# Optionally: pip install -r web/requirements.txt  # for web interface
 ```
 
-### Requirements
-- Python 3.8+
-- PyTorch 1.12+
-- NumPy, SciPy, librosa
-- Flask (for evaluation server)
-- ffmpeg (for audio processing)
+***
 
-## Quick Start
+## Usage
 
-### 1. Training a Model
+### 1. Web Interface
+
 ```bash
-python train_transformer.py --config config/default.yaml
-```
-
-### 2. Generating Charts
-```bash
-python generate_chart.py model.pth input_songs/song.npy output_chart.osu --difficulty oni
-```
-
-### 3. Human Evaluation
-```bash
-python tools/human_eval/server.py
-# Open http://localhost:5000 to rate generated charts
-```
-
-### 4. API Server
-```bash
+cd web
 python server.py
-# POST to /generate with audio files
+# Visit http://localhost:5000 to access the dashboard
 ```
+
+- Upload audio for chart generation, set difficulty/style, view progress, and export charts
+- Train models and monitor status live in the browser
+- Rate and comment on generated charts to provide feedback for RLHF
+
+### 2. CLI
+
+- **Train a model:**
+  ```bash
+  python train_transformer.py --config config/default.yaml
+  ```
+- **Generate a chart:**
+  ```bash
+  python generate_chart.py model.pth input_songs/song.npy output_chart.osu --difficulty oni
+  ```
+- **Batch processing:** See CLI docs and scripts.
+
+***
 
 ## Configuration
 
-All hyperparameters are managed through YAML configuration files:
+- All hyperparameters are in YAML files (see `config/`). Example:
+  ```yaml
+  model:
+    d_model: 256
+    nhead: 8
+    num_encoder_layers: 6
+    num_decoder_layers: 6
+  ```
+- Change batch size, pattern memory, or audio settings as needed.
 
-```yaml
-model:
-  d_model: 256
-  nhead: 8
-  num_encoder_layers: 6
-  num_decoder_layers: 6
-
-training:
-  batch_size: 16
-  learning_rate: 5e-5
-  multi_task:
-    difficulty_loss_weight: 0.1
-    pattern_loss_weight: 0.2
-
-data:
-  max_sequence_length: 2048
-  time_quantization_ms: 100
-```
+***
 
 ## Data Format
 
-### Input Audio Features
-- Pre-computed spectral features (`.npy` files)
-- Frame rate: ~43Hz (23.2ms resolution)
-- Feature size: 80 dimensions (mel-scale spectrogram)
+- **Input:** Numpy spectrograms (80 bands, 23.2ms frames)
+- **Chart tokens:** `[don, ka, big_don, big_ka, roll_start, roll_end, finisher]` (boolean vectors)
+- **Configurable tokenization & quantization for research
 
-### Chart Format
-- 7-dimensional vectors: `[don, ka, big_don, big_ka, roll_start, roll_end, finisher]`
-- Boolean encoding for simultaneous events
-- Tokenized using BEaRT-style discrete vocabulary
+***
 
-## Evaluation Metrics
+## Evaluation & Research
 
-### Quantitative (Automated)
-- **Pattern Overlap**: Percentage of human patterns used
-- **Pattern Space Coverage**: Variety of unique patterns
-- **Note Type Distribution**: Statistical similarity to human charts
-- **Onset Detection**: F1 score for note timing accuracy
+- **Automated:** Pattern overlap, space coverage, note type distribution, F1 timing score
+- **Human:** Fun, musicality, playability, pattern logic, difficulty accuracy (all 1–10 scale)
+- **RLHF pipeline:** Human ratings are saved for reward learning
 
-### Qualitative (Human)
-- **Fun Rating**: Subjective enjoyment (1-10)
-- **Musicality**: How well notes match the music (1-10)
-- **Playability**: Physical comfort and flow (1-10)
-- **Pattern Coherence**: Logical pattern structure (1-10)
-- **Difficulty Accuracy**: Appropriate for target skill level (1-10)
+***
 
-## Research Applications
+## Contributions
 
-This codebase enables several research directions:
+We welcome PRs for:
+- Model architectures & optimizations
+- Audio processing, pattern analysis, and visualization enhancements
+- Web/dashboard UX and new export formats
+- Data augmentation and chart importers
+- RLHF integration and evaluation analysis
 
-### Implemented
-- **Multi-difficulty conditioning** for skill-appropriate generation
-- **Pattern-aware attention** for musical coherence
-- **Human preference learning** through evaluation pipeline
+***
 
-### Future Directions
-- **Reinforcement Learning from Human Feedback (RLHF)**
-- **Style transfer** between mappers
-- **Cross-game adaptation** (DDR, Guitar Hero, etc.)
-- **Real-time generation** for live performances
+## Cite Us
 
-## Contributing
-
-We welcome contributions in several areas:
-
-- **Model Architecture**: New attention mechanisms, loss functions
-- **Data Pipeline**: Audio processing, augmentation techniques  
-- **Evaluation**: New metrics, visualization tools
-- **Applications**: Web interfaces, game integrations
-
-## Citation
-
-If you use this work in your research, please cite both the original paper and this implementation:
+If you use our system, please cite:
 
 ```bibtex
 @inproceedings{halina2021taikonation,
@@ -190,7 +127,6 @@ If you use this work in your research, please cite both the original paper and t
   booktitle={Proceedings of the Twelfth Workshop on Procedural Content Generation},
   year={2021}
 }
-
 @misc{taikonationv1_2025,
   title={TaikoNationV1: Modern Implementation with Multi-Difficulty and Pattern-Aware Generation},
   author={myrqyry},
@@ -199,12 +135,14 @@ If you use this work in your research, please cite both the original paper and t
 }
 ```
 
+***
+
 ## Acknowledgments
 
-- **Emily Halina & Matthew Guzdial** for the original TaikoNation research and codebase
-- **The osu!taiko community** for inspiration and feedback
-- **PyTorch and Hugging Face** teams for excellent ML frameworks
+Thanks to Emily Halina, Matthew Guzdial, the osu!taiko community, and all contributors. Powered by PyTorch, Hugging Face, and open-source rhythm game fans worldwide.
 
 ***
 
 *"The rhythm is just a click away."* 🥁
+
+***

@@ -74,13 +74,27 @@ class TaikoTransformer(nn.Module):
             torch.Tensor: The output logits over the vocabulary.
         """
         # --- Prepare Inputs ---
+        # Expected shapes (batch_first=True):
+        #  src: (batch, seq_len_src, audio_feature_size)
+        #  tgt: (batch, seq_len_tgt)
+        #  genre_id, difficulty_id: (batch,)
+        # We add light assertions to help catch shape mismatches during development.
+        if src.dim() != 3:
+            raise ValueError(f"Expected src to be 3D (batch,seq,feat); got shape {tuple(src.shape)}")
+        if tgt.dim() != 2:
+            raise ValueError(f"Expected tgt to be 2D (batch,seq); got shape {tuple(tgt.shape)}")
+        if genre_id.dim() not in (1,):
+            # allow scalar genre_id in eval but prefer vector in training
+            raise ValueError(f"Expected genre_id to be 1D (batch,); got shape {tuple(genre_id.shape)}")
+
         src = self.audio_input_projection(src) * math.sqrt(self.d_model)
         src = self.pos_encoder(src)
 
         # Embed tokens, add genre and difficulty styles, and add positional encoding
         tgt_embed = self.token_embedding(tgt) * math.sqrt(self.d_model)
-        genre_embed = self.genre_embedding(genre_id).unsqueeze(1).expand_as(tgt_embed)
-        difficulty_embed = self.difficulty_embedding(difficulty_id).unsqueeze(1).expand_as(tgt_embed)
+        # Expand genre/difficulty embeddings to match tgt token embeddings
+        genre_embed = self.genre_embedding(genre_id).unsqueeze(1).expand(-1, tgt_embed.size(1), -1)
+        difficulty_embed = self.difficulty_embedding(difficulty_id).unsqueeze(1).expand(-1, tgt_embed.size(1), -1)
         tgt = self.pos_encoder(tgt_embed + genre_embed + difficulty_embed)
 
         # --- Create Masks ---
