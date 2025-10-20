@@ -586,6 +586,61 @@ class TaikoNationApp {
         slider.style.background = `linear-gradient(to right, var(--accent-primary) 0%, var(--accent-primary) ${percent}%, var(--bg-tertiary) ${percent}%, var(--bg-tertiary) 100%)`;
     }
 
+    async startComparativeEvaluation() {
+        try {
+            const response = await fetch(`${this.apiBase}/charts`);
+            if (response.ok) {
+                const data = await response.json();
+                if (data.charts.length >= 2) {
+                    const chartA = data.charts[Math.floor(Math.random() * data.charts.length)];
+                    let chartB = data.charts[Math.floor(Math.random() * data.charts.length)];
+                    while (chartB.id === chartA.id) {
+                        chartB = data.charts[Math.floor(Math.random() * data.charts.length)];
+                    }
+                    this.showComparativeEvaluation(chartA, chartB);
+                } else {
+                    this.addSystemLog('warning', 'Not enough charts for comparative evaluation');
+                }
+            }
+        } catch (error) {
+            console.error('Failed to load charts for comparative evaluation:', error);
+        }
+    }
+
+    showComparativeEvaluation(chartA, chartB) {
+        document.getElementById('comparativeEvaluation').style.display = 'block';
+        document.getElementById('chartA').innerText = chartA.title;
+        document.getElementById('chartB').innerText = chartB.title;
+        document.getElementById('chartA').dataset.id = chartA.id;
+        document.getElementById('chartB').dataset.id = chartB.id;
+    }
+
+    async submitComparativeEvaluation(preference) {
+        const chartA_id = document.getElementById('chartA').dataset.id;
+        const chartB_id = document.getElementById('chartB').dataset.id;
+        const formData = new FormData();
+        formData.append('chartA_id', chartA_id);
+        formData.append('chartB_id', chartB_id);
+        formData.append('preference', preference);
+
+        try {
+            const response = await fetch(`${this.apiBase}/submit-comparative-evaluation`, {
+                method: 'POST',
+                body: formData
+            });
+
+            if (response.ok) {
+                this.addSystemLog('success', 'Comparative evaluation submitted successfully');
+                this.startComparativeEvaluation(); // Load next pair
+            } else {
+                throw new Error('Failed to submit comparative evaluation');
+            }
+        } catch (error) {
+            console.error('Comparative evaluation submission error:', error);
+            this.addSystemLog('error', 'Failed to submit comparative evaluation');
+        }
+    }
+
     // Configuration methods
     async loadConfig() {
         try {
@@ -653,6 +708,26 @@ class TaikoNationApp {
     async refreshStatus() {
         await this.loadDashboardData();
         this.addSystemLog('info', 'Status refreshed');
+    }
+
+    async loadResearchData() {
+        try {
+            const response = await fetch(`${this.apiBase}/research/experiments`);
+            if (response.ok) {
+                const data = await response.json();
+                this.updateResearchDashboard(data);
+            }
+        } catch (error) {
+            console.error('Failed to load research data:', error);
+        }
+    }
+
+    updateResearchDashboard(data) {
+        const { experiments, model_comparisons, pattern_evolution, human_feedback_stats } = data;
+        document.getElementById('experimentHistory').innerText = JSON.stringify(experiments, null, 2);
+        document.getElementById('modelComparisons').innerText = JSON.stringify(model_comparisons, null, 2);
+        document.getElementById('patternEvolution').innerText = JSON.stringify(pattern_evolution, null, 2);
+        document.getElementById('humanFeedbackStats').innerText = JSON.stringify(human_feedback_stats, null, 2);
     }
 }
 
@@ -727,7 +802,8 @@ function showPage(pageId) {
         'generation': 'Chart Generation',
         'library': 'Chart Library',
         'evaluation': 'Human Evaluation',
-        'config': 'Configuration'
+        'config': 'Configuration',
+        'research': 'Research'
     };
     
     const pageTitle = document.getElementById('pageTitle');
@@ -738,6 +814,9 @@ function showPage(pageId) {
     // Update current page in app instance
     if (window.taikoApp) {
         window.taikoApp.currentPage = pageId;
+        if (pageId === 'research') {
+            window.taikoApp.loadResearchData();
+        }
     }
 }
 
@@ -819,6 +898,18 @@ function skipEvaluation() {
     }
 }
 
+function startComparativeEvaluation() {
+    if (window.taikoApp) {
+        window.taikoApp.startComparativeEvaluation();
+    }
+}
+
+function submitComparativeEvaluation(preference) {
+    if (window.taikoApp) {
+        window.taikoApp.submitComparativeEvaluation(preference);
+    }
+}
+
 function loadConfig() {
     if (window.taikoApp) {
         window.taikoApp.loadConfig();
@@ -834,6 +925,12 @@ function saveConfig() {
 function refreshStatus() {
     if (window.taikoApp) {
         window.taikoApp.refreshStatus();
+    }
+}
+
+function exportResearchDataset() {
+    if (window.taikoApp) {
+        window.open('/api/research/export-dataset');
     }
 }
 
