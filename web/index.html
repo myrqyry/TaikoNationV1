@@ -38,6 +38,10 @@
                     <span class="nav-icon">⚙️</span>
                     Configuration
                 </button>
+                <button class="nav-item" data-page="research">
+                    <span class="nav-icon">🔬</span>
+                    Research
+                </button>
             </nav>
         </div>
 
@@ -302,6 +306,7 @@
                         <div class="section-header">
                             <h2 class="section-title">Human Evaluation System</h2>
                             <button class="btn" onclick="startEvaluation()">Start Evaluation Session</button>
+                            <button class="btn btn-secondary" onclick="startComparativeEvaluation()">Start Comparative Evaluation</button>
                         </div>
                         
                         <form id="evaluationForm" style="display: none;">
@@ -355,6 +360,19 @@
                                 </div>
                             </div>
                         </form>
+
+                        <div id="comparativeEvaluation" style="display: none;">
+                            <h3>Which chart is better?</h3>
+                            <div class="comparative-grid">
+                                <div class="chart-comparison-card" id="chartA"></div>
+                                <div class="chart-comparison-card" id="chartB"></div>
+                            </div>
+                            <div class="comparison-actions">
+                                <button class="btn" onclick="submitComparativeEvaluation('A')">Chart A is better</button>
+                                <button class="btn" onclick="submitComparativeEvaluation('B')">Chart B is better</button>
+                                <button class="btn btn-secondary" onclick="submitComparativeEvaluation('tie')">They are about the same</button>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -391,6 +409,34 @@
                                 <button type="button" class="btn btn-tertiary" onclick="resetToDefaults()">Reset to Defaults</button>
                             </div>
                         </form>
+                    </div>
+                </div>
+
+                <!-- Research Page -->
+                <div id="research-page" class="page-content hidden">
+                    <div class="section-card">
+                        <div class="section-header">
+                            <h2 class="section-title">Research Dashboard</h2>
+                            <button class="btn" onclick="exportResearchDataset()">Export Dataset</button>
+                        </div>
+                        <div class="research-grid">
+                            <div class="research-item">
+                                <h3>Experiment History</h3>
+                                <div id="experimentHistory"></div>
+                            </div>
+                            <div class="research-item">
+                                <h3>Model Comparisons</h3>
+                                <div id="modelComparisons"></div>
+                            </div>
+                            <div class="research-item">
+                                <h3>Pattern Evolution</h3>
+                                <div id="patternEvolution"></div>
+                            </div>
+                            <div class="research-item">
+                                <h3>Human Feedback Stats</h3>
+                                <div id="humanFeedbackStats"></div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </main>
