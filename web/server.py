@@ -130,6 +130,7 @@ class ChartGenerationSchema(Schema):
     )
     pattern_style = fields.Str(load_default="balanced")
     audio_filename = fields.Str(required=True)
+    npy_filename = fields.Str(required=False, load_default=None)
 
 
 class TrainingSchema(Schema):
@@ -156,6 +157,11 @@ class TaskManager:
         self.active_tasks = {}
 
     def submit_task(self, fn, *args, **kwargs):
+        if app.testing:
+            # Run synchronously in test mode to avoid race conditions
+            fn(*args, **kwargs)
+            return "test_task_id"
+
         task_id = str(uuid.uuid4())
         future = self.executor.submit(fn, *args, **kwargs)
         self.active_tasks[task_id] = future
@@ -615,6 +621,7 @@ def api_models():
     return jsonify({'models': active_models})
 
 @app.route('/api/upload-audio', methods=['POST'])
+@require_api_token
 def api_upload_audio():
     """Handle audio file upload and processing."""
     if 'audio' not in request.files:
@@ -628,6 +635,9 @@ def api_upload_audio():
         try:
             # Secure the filename
             filename = secure_filename(file.filename)
+            if not filename:  # NEW: Check if filename becomes empty
+                return jsonify({'error': 'Invalid filename'}), 400
+
             # Validate extension server-side
             ALLOWED_EXT = {'.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac'}
             ext = os.path.splitext(filename.lower())[1]
@@ -647,6 +657,7 @@ def api_upload_audio():
             return jsonify({
                 'success': True,
                 'filename': filename,
+                'npy_filename': audio_data.get('npy_filename'),  # NEW: include .npy filename
                 'title': extract_title_from_filename(filename),
                 'detected_bpm': audio_data.get('bpm'),
                 'duration': audio_data.get('duration'),
@@ -660,6 +671,7 @@ def api_upload_audio():
 
 
 @app.route('/api/start-training', methods=['POST'])
+@require_api_token
 def api_start_training():
     """Start model training."""
     try:
@@ -683,6 +695,7 @@ def api_start_training():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/stop-training', methods=['POST'])
+@require_api_token
 def api_stop_training():
     """Stop model training."""
     try:
@@ -700,13 +713,19 @@ def api_stop_training():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/generate-chart', methods=['POST'])
+@require_api_token
 def api_generate_chart():
     """Generate a chart from uploaded audio."""
     try:
+        # Support both JSON and form data
+        if request.is_json:
+            request_data = request.get_json() or {}
+        else:
+            request_data = request.form.to_dict()
+
         # Validate generation parameters
         schema = ChartGenerationSchema()
-        # The form data is now expected to be JSON
-        params = schema.load(request.get_json())
+        params = schema.load(request_data)
 
         # Start chart generation
         start_chart_generation(params)
@@ -751,6 +770,7 @@ def api_get_chart_for_evaluation():
         return jsonify({'error': 'No charts available for evaluation'}), 404
 
 @app.route('/api/submit-evaluation', methods=['POST'])
+@require_api_token
 def api_submit_evaluation():
     """Submit human evaluation for a chart."""
     try:
@@ -779,6 +799,7 @@ def api_submit_evaluation():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/submit-comparative-evaluation', methods=['POST'])
+@require_api_token
 def api_submit_comparative_evaluation():
     """Submit comparative human evaluation for a chart."""
     try:
@@ -801,6 +822,7 @@ def api_submit_comparative_evaluation():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/config', methods=['GET', 'POST'])
+@require_api_token
 def api_config():
     """Get or update system configuration."""
     if request.method == 'GET':
@@ -835,16 +857,14 @@ def process_uploaded_audio(filepath: str) -> Dict[str, Any]:
     """Process uploaded audio file and extract features."""
     try:
         # Load audio using librosa
-        # Try to load with original sampling rate to preserve tempo info
         y, sr = librosa.load(filepath, sr=None)
 
         # Extract basic information
         duration = len(y) / float(sr) if sr and len(y) else 0.0
 
-        # Robust BPM estimation: try multiple methods and fallbacks
+        # BPM estimation (existing code)
         tempo_val = None
         try:
-            # librosa.beat.tempo returns an array of tempi (autocorrelation-based)
             est = librosa.beat.tempo(y=y, sr=sr)
             if hasattr(est, '__len__') and len(est) > 0:
                 tempo_val = float(est[0])
@@ -855,25 +875,33 @@ def process_uploaded_audio(filepath: str) -> Dict[str, Any]:
 
         if tempo_val is None:
             try:
-                # beat_track returns tempo and beat frames
                 tempo_bt, _ = librosa.beat.beat_track(y=y, sr=sr)
                 tempo_val = float(tempo_bt)
             except Exception:
                 tempo_val = None
 
-        # Ensure tempo is reasonable; otherwise set to None
         if tempo_val is not None:
             if tempo_val <= 0 or tempo_val > 1000:
                 tempo_val = None
 
-        # Extract audio features for the model (may return None on error)
+        # ALWAYS extract features and save .npy file
         features = None
+        npy_filename = None
         try:
             features = get_audio_features(
                 filepath,
                 source_resolution_ms=server.config['data']['source_resolution_ms'],
                 frame_duration_ms=server.config['data']['time_quantization_ms']
             )
+
+            # Save features as .npy file alongside audio
+            if features is not None:
+                base_name = os.path.splitext(os.path.basename(filepath))[0]
+                npy_filename = f"{base_name}.npy"
+                npy_path = os.path.join(UPLOAD_FOLDER, npy_filename)
+                np.save(npy_path, features)
+                logger.info(f"Saved features to {npy_path} with shape {features.shape}")
+
         except Exception as e:
             logger.warning(f"Feature extraction failed for {filepath}: {e}")
 
@@ -883,7 +911,8 @@ def process_uploaded_audio(filepath: str) -> Dict[str, Any]:
             'duration': duration,
             'bpm': int(tempo_val) if tempo_val is not None else None,
             'features_extracted': features is not None,
-            'feature_shape': features.shape if features is not None else None
+            'feature_shape': features.shape if features is not None else None,
+            'npy_filename': npy_filename  # NEW: return the .npy filename for frontend
         }
 
     except Exception as e:
@@ -949,21 +978,21 @@ def start_chart_generation(params: Dict[str, Any]):
         try:
             socketio.emit('generation_progress', {'progress': 10})
 
-            # This is a placeholder; a real implementation needs a trained model.
             model_path = os.path.join(MODEL_FOLDER, 'taiko_transformer.pth')
             if not os.path.exists(model_path):
                 server.add_system_log('warning', f"Model file not found at {model_path}. Using random weights.")
-                # The script will proceed with a warning, using a randomly initialized model.
 
-            # We need the path to the audio features .npy file.
-            # This should be passed in params from the frontend after upload.
-            # For now, let's assume a placeholder convention.
-            audio_filename = secure_filename(params.get('audio_filename', f"{params['title']}.mp3"))
-            npy_path = os.path.join(UPLOAD_FOLDER, os.path.splitext(audio_filename)[0] + '.npy')
+            # The npy_filename is now required
+            npy_filename = params.get('npy_filename')
+            if not npy_filename:
+                server.add_system_log('error', "NPY filename not provided for chart generation.")
+                raise ValueError("NPY filename not provided.")
+
+            npy_path = os.path.join(UPLOAD_FOLDER, npy_filename)
 
             if not os.path.exists(npy_path):
                 server.add_system_log('error', f"Could not find feature file: {npy_path}")
-                raise FileNotFoundError(f"Feature file not found for {audio_filename}")
+                raise FileNotFoundError(f"Feature file not found: {npy_path}")
 
             output_filename = f"{secure_filename(params['title'])}_{uuid.uuid4().hex[:8]}.osu"
             output_path = os.path.join(CHART_OUTPUT_FOLDER, output_filename)
@@ -977,6 +1006,7 @@ def start_chart_generation(params: Dict[str, Any]):
                 '--difficulty', params['difficulty'],
                 '--title', params['title'],
                 '--artist', params['artist'],
+                '--seed', '42',  # NEW: deterministic by default
             ]
 
             logger.info(f"Running command: {shlex.join(command)}")

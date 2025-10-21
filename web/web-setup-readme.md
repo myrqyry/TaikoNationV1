@@ -61,6 +61,19 @@ TaikoNationV1/
 
 3. **Upload audio**: Drag and drop MP3/WAV/OGG/FLAC files to generate charts
 
+## Security Configuration
+
+For production deployment, set an API token:
+
+```
+export TAIKONATION_API_TOKEN="your-secure-random-token-here"
+```
+
+Include this token in requests as:
+- Header: `Authorization: Bearer your-token`
+- Query param: `?api_token=your-token`
+- Form field: `api_token=your-token`
+
 4. **Configure training**: Set hyperparameters for transformer or legacy models
 
 5. **Monitor progress**: View real-time training and generation progress
