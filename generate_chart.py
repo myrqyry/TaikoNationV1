@@ -4,6 +4,7 @@ import os
 import torch
 import yaml
 import numpy as np
+from tqdm import tqdm
 
 from transformer_model import TaikoTransformer
 from tokenization import TaikoTokenizer
@@ -48,7 +49,7 @@ def load_model(checkpoint_path, config, device):
     model.eval()
     return model
 
-def generate_chart(model, audio_features, tokenizer, difficulty_id, config, device):
+def generate_chart(model, audio_features, tokenizer, difficulty_id, config, device, temperature=1.0):
     """Generates a chart token sequence from audio features."""
     print("Generating chart...")
 
@@ -66,7 +67,7 @@ def generate_chart(model, audio_features, tokenizer, difficulty_id, config, devi
         # The loop must not exceed the model's maximum sequence length.
         # We subtract 1 because the sequence starts with a [CLS] token.
         max_len = config['data']['max_sequence_length']
-        for _ in range(max_len - 1):
+        for _ in tqdm(range(max_len - 1), desc="Generating tokens"):
             # For simplicity, we use a placeholder genre_id
             genre_id = torch.tensor([0], dtype=torch.long).to(device)
             difficulty_tensor = torch.tensor([difficulty_id], dtype=torch.long).to(device)
@@ -76,7 +77,15 @@ def generate_chart(model, audio_features, tokenizer, difficulty_id, config, devi
 
             # Greedy decoding: get the most likely next token
             next_token_logits = output_logits[:, -1, :]
-            next_token_id = torch.argmax(next_token_logits, dim=-1).item()
+            if temperature != 1.0:
+                next_token_logits = next_token_logits / temperature
+
+            # Apply softmax to get probabilities
+            probabilities = torch.nn.functional.softmax(next_token_logits, dim=-1)
+
+            # Sample from the distribution
+            next_token_id = torch.multinomial(probabilities, 1).item()
+
 
             generated_tokens.append(next_token_id)
 
@@ -86,22 +95,38 @@ def generate_chart(model, audio_features, tokenizer, difficulty_id, config, devi
 
     return generated_tokens
 
-def save_osu_chart(token_ids, tokenizer, output_path, audio_filename):
+def save_osu_chart(token_ids, tokenizer, output_path, audio_filename, title=None, artist=None, source="", tags=""):
     """Saves the generated tokens to a basic .osu file."""
     print(f"Saving chart to {output_path}...")
 
-    # This is a very basic .osu file header.
-    # A real implementation would have more metadata.
+    # Infer title and artist from filename if not provided
+    if title is None or artist is None:
+        filename_no_ext = os.path.splitext(os.path.basename(audio_filename))[0]
+        parts = filename_no_ext.split(' - ')
+        if len(parts) == 2:
+            inferred_artist, inferred_title = parts
+            if artist is None:
+                artist = inferred_artist
+            if title is None:
+                title = inferred_title
+        else:
+            if title is None:
+                title = filename_no_ext
+            if artist is None:
+                artist = "Unknown Artist"
+
     osu_header = f"""osu file format v14
 [General]
 AudioFilename: {os.path.basename(audio_filename)}
 AudioLeadIn: 0
 Mode: 1
 [Metadata]
-Title: Generated Chart
-Artist: AI
-Creator: TaikoNationV1
-Version: Normal
+Title:{title}
+Artist:{artist}
+Creator:TaikoNationV1
+Version:Normal
+Source:{source}
+Tags:{tags}
 [Difficulty]
 HPDrainRate:5
 CircleSize:5
@@ -126,15 +151,20 @@ SliderTickRate:1
         for token_name in token_names:
             if token_name not in tokenizer.special_tokens and token_name != "[EMPTY]":
                 # x,y,time,type,hitSound,objectParams,hitSample
-                # For Taiko, x is always 256, y is always 192
-                # type 1 = don, type 4 = finisher, type 8 = ka
-                note_type = 1 # Default to 'don'
-                if "ka" in token_name:
-                    note_type = 8
-                if "big" in token_name:
-                    note_type = 4
+                # For Taiko, x is always 256, y is always 192.
+                # type is a bitfield; 1 means it's a circle. All our notes are circles.
+                note_type = 1
 
-                f.write(f"256,192,{current_time},{note_type},0,0:0:0:0:\n")
+                # hitSound is a bitfield: 0=normal, 2=whistle, 4=finish, 8=clap.
+                # 'ka' is represented by the 'clap' hitSound.
+                # 'big' notes are represented by the 'finish' hitSound.
+                hit_sound = 0
+                if "ka" in token_name:
+                    hit_sound |= 8  # Clap for ka
+                if "big" in token_name:
+                    hit_sound |= 4  # Finish for big notes
+
+                f.write(f"256,192,{current_time},{note_type},{hit_sound},0:0:0:0:\n")
                 current_time += time_interval
 
     print("Chart saved successfully.")
@@ -147,10 +177,21 @@ def main():
     parser.add_argument("output_path", help="Path to save the generated chart (.osu).")
     parser.add_argument("--difficulty", "-d", default="oni", help="Chart difficulty (e.g., easy, normal, hard, oni).")
     parser.add_argument("--config", default="config/default.yaml", help="Path to the configuration file.")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for deterministic generation.")
+    parser.add_argument("--temperature", type=float, default=1.0, help="Temperature for sampling logits.")
+    parser.add_argument("--title", default=None, help="Song title for .osu metadata.")
+    parser.add_argument("--artist", default=None, help="Song artist for .osu metadata.")
+    parser.add_argument("--source", default="", help="Source of the song for .osu metadata.")
+    parser.add_argument("--tags", default="", help="Tags for .osu metadata.")
 
     args = parser.parse_args()
 
     # --- Setup ---
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+        print(f"Using random seed: {args.seed}")
+
     if not os.path.exists(args.audio_path):
         print(f"Error: Audio file not found at {args.audio_path}")
         return
@@ -177,6 +218,14 @@ def main():
     # A more robust implementation would run get_audio_features here.
     try:
         audio_features = np.load(args.audio_path)
+
+        # Validate audio feature shape
+        expected_feature_size = config['model']['audio_feature_size']
+        if audio_features.shape[1] != expected_feature_size:
+            print(f"Error: Audio feature size mismatch. Model expects {expected_feature_size}, but got {audio_features.shape[1]}.")
+            print("Please re-run feature extraction with the correct settings.")
+            return
+
         # Truncate the audio features to the model's max sequence length
         max_len = config['data']['max_sequence_length']
         if audio_features.shape[0] > max_len:
@@ -187,8 +236,9 @@ def main():
         return
 
     # --- Generate and Save ---
-    generated_token_ids = generate_chart(model, audio_features, tokenizer, difficulty_id, config, device)
-    save_osu_chart(generated_token_ids, tokenizer, args.output_path, args.audio_path)
+    generated_token_ids = generate_chart(model, audio_features, tokenizer, difficulty_id, config, device, temperature=args.temperature)
+    save_osu_chart(generated_token_ids, tokenizer, args.output_path, args.audio_path,
+                   title=args.title, artist=args.artist, source=args.source, tags=args.tags)
 
 
 if __name__ == "__main__":

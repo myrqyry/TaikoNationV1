@@ -42,6 +42,7 @@ class TaikoNationApp {
         this.apiBase = '/api';
         this.wsConnection = null;
         this.stateManager = new StateManager();
+        this.uploadedAudioFilename = null;
         
         this.init();
     }
@@ -341,6 +342,7 @@ class TaikoNationApp {
             if (response.ok) {
                 const result = await response.json();
                 this.addSystemLog('success', `Audio processed: ${file.name}`);
+                this.uploadedAudioFilename = result.filename;
                 
                 // Auto-fill form fields if on generation page
                 if (this.currentPage === 'generation') {
@@ -468,14 +470,24 @@ class TaikoNationApp {
     // Generation methods
     async generateChart() {
         const form = document.getElementById('generationForm');
+        if (!this.uploadedAudioFilename) {
+            this.addSystemLog('error', 'Please upload an audio file first.');
+            return;
+        }
+
         const formData = new FormData(form);
-        
+        const data = Object.fromEntries(formData.entries());
+        data.audio_filename = this.uploadedAudioFilename;
+
         try {
             this.stateManager.setState('generation', { active: true, progress: 0 });
             
             const response = await fetch(`${this.apiBase}/generate-chart`, {
                 method: 'POST',
-                body: formData
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(data),
             });
             
             if (response.ok) {
@@ -745,6 +757,9 @@ TaikoNationApp.prototype.addGeneratedChart = function(chart) {
             <div class="chart-info">
                 <div class="chart-title">${chart.title}</div>
                 <div class="chart-meta">${chart.artist} • ${chart.bpm} BPM</div>
+                <div class="chart-actions">
+                    <a href="/api/download-chart?id=${chart.id}" class="btn btn-secondary" download>Download .osu</a>
+                </div>
             </div>
         `;
         grid.prepend(card);
