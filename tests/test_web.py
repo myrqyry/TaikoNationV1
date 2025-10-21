@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
 import json
 import io
 import numpy as np
@@ -45,8 +46,13 @@ class TestWebAPI(unittest.TestCase):
                 os.remove(os.path.join(self.chart_folder, f))
 
     @unittest.skip("Skipping flaky test that fails in some environments due to file I/O and threading issues.")
-    def test_full_workflow(self):
+    @patch('server.subprocess.run')
+    def test_full_workflow(self, mock_subprocess_run):
         """Test the full upload -> generate -> download workflow."""
+        # Configure the mock to simulate a successful chart generation
+        mock_subprocess_run.return_value.returncode = 0
+        mock_subprocess_run.return_value.stdout = "Chart generated successfully."
+        mock_subprocess_run.return_value.stderr = ""
         # 1. Upload audio (simulated with a silent WAV file)
         samplerate = 44100
         duration_seconds = 5
