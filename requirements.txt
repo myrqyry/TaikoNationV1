@@ -1,9 +1,12 @@
+# requirements.txt
+#
+# This file contains the core dependencies for the TaikoNationV1 project.
+# These packages are required for training models and generating charts.
+
 torch>=2.0.0
-torchaudio>=2.0.0
-transformers>=4.35.0
+PyYAML>=6.0
+numpy>=1.22.0
 librosa>=0.10.0
+transformers>=4.35.0
 wandb
-numpy
-tflearn
-tensorflow
-PyYAML>=5.0
+scikit-learn

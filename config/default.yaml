@@ -1,4 +1,7 @@
-# Default configuration for the Taiko Transformer model
+# config/default.yaml
+
+# This file contains the default hyperparameters for the TaikoTransformer model,
+# data processing, and training pipeline.
 
 model:
   d_model: 256
@@ -7,36 +10,27 @@ model:
   num_decoder_layers: 6
   dim_feedforward: 1024
   dropout: 0.1
-  audio_feature_size: 80 # Determined by the pre-computed .npy files
+  audio_feature_size: 80 # Corresponds to the 80 bands in the spectrogram
+  # Vocab size, num_genres, and num_difficulties are determined at runtime from the dataset
 
 data:
   max_sequence_length: 512
-  # The tokenizer and audio processing must be aligned.
-  # We use 100ms as the quantization step.
-  time_quantization_ms: 100
-  # The resolution of the source data, used for framing.
-  source_resolution_ms: 23.2
+  time_quantization_ms: 100 # Each token represents a 100ms chunk of time
+  source_resolution_ms: 23.2 # The resolution of the input spectrogram features
 
 training:
+  batch_size: 16
   learning_rate: 0.0001
-  batch_size: 8
-  num_epochs: 50 # Increased from 25 for more robust training
-  save_path: "output/taiko_transformer.pth"
+  num_epochs: 50
+  k_folds: 5 # For cross-validation
+  use_wandb: true # Toggle for Weights & Biases logging
+  early_stopping_patience: 5
+  lr_scheduler_patience: 2
 
-  # --- New Infrastructure Settings ---
-  # Learning rate scheduler settings (ReduceLROnPlateau)
-  scheduler:
-    patience: 3      # How many epochs to wait for improvement
-    factor: 0.5        # Factor by which to reduce the learning rate
-    min_lr: 0.000001   # Minimum learning rate
-
-  # Early stopping settings
-  early_stopping:
-    patience: 7      # How many epochs to wait for improvement before stopping
-    min_delta: 0.001   # Minimum change in validation loss to be considered an improvement
-
-  # Cross-validation settings
-  k_folds: 5
-
-# --- Development Settings ---
-dry_run: false # Set to true to run a quick test with one fold and fewer batches
+generate:
+  # Parameters for chart generation
+  max_output_length: 1024
+  # Default difficulty to use if not specified via CLI
+  default_difficulty: "oni"
+  # Beam size for beam search decoding (1 = greedy)
+  beam_size: 1

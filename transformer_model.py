@@ -29,7 +29,7 @@ class TaikoTransformer(nn.Module):
     """
     def __init__(self, vocab_size, num_genres, num_difficulties, d_model=256, nhead=8, num_encoder_layers=6,
                  num_decoder_layers=6, dim_feedforward=1024, dropout=0.1,
-                 audio_feature_size=80):
+                 audio_feature_size=80, max_sequence_length=512):
         super(TaikoTransformer, self).__init__()
         self.d_model = d_model
 
@@ -37,7 +37,7 @@ class TaikoTransformer(nn.Module):
         self.token_embedding = nn.Embedding(vocab_size, d_model)
         self.genre_embedding = nn.Embedding(num_genres, d_model)
         self.difficulty_embedding = nn.Embedding(num_difficulties, d_model)
-        self.pos_encoder = PositionalEncoding(d_model)
+        self.pos_encoder = PositionalEncoding(d_model, max_len=max_sequence_length)
 
         # A linear layer to project the audio features into the model's dimension (d_model)
         self.audio_input_projection = nn.Linear(audio_feature_size, d_model)
