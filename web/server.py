@@ -13,6 +13,8 @@ import json
 import yaml
 import asyncio
 import logging
+import subprocess
+import shlex
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -127,6 +129,7 @@ class ChartGenerationSchema(Schema):
         validate=lambda x: x in ["kantan", "futsuu", "muzukashii", "oni", "ura"],
     )
     pattern_style = fields.Str(load_default="balanced")
+    audio_filename = fields.Str(required=True)
 
 
 class TrainingSchema(Schema):
@@ -702,7 +705,8 @@ def api_generate_chart():
     try:
         # Validate generation parameters
         schema = ChartGenerationSchema()
-        params = schema.load(request.form)
+        # The form data is now expected to be JSON
+        params = schema.load(request.get_json())
 
         # Start chart generation
         start_chart_generation(params)
@@ -723,6 +727,19 @@ def api_generate_chart():
 def api_charts():
     """Get list of generated charts."""
     return jsonify({'charts': generated_charts})
+
+@app.route('/api/download-chart')
+def download_chart():
+    """Download a generated chart file."""
+    chart_id = request.args.get('id', type=int)
+    if not chart_id:
+        return jsonify({'error': 'Missing chart ID'}), 400
+
+    chart = next((c for c in generated_charts if c['id'] == chart_id), None)
+    if not chart or 'filename' not in chart:
+        return jsonify({'error': 'Chart not found or filename missing'}), 404
+
+    return send_from_directory(CHART_OUTPUT_FOLDER, chart['filename'], as_attachment=True)
 
 @app.route('/api/get-chart-for-evaluation')
 def api_get_chart_for_evaluation():
@@ -928,37 +945,75 @@ def start_chart_generation(params: Dict[str, Any]):
     run_id = server.experiment_tracker.start_experiment(params, name=f"Generation: {params['title']}")
 
     def generation_task():
-        """Simulates the chart generation process."""
-        for progress in range(0, 101, 10):
-            if not server.generation_active:
-                break
+        """Runs generate_chart.py as a subprocess."""
+        try:
+            socketio.emit('generation_progress', {'progress': 10})
 
-            socketio.emit('generation_progress', {'progress': progress})
-            socketio.sleep(1)
+            # This is a placeholder; a real implementation needs a trained model.
+            model_path = os.path.join(MODEL_FOLDER, 'taiko_transformer.pth')
+            if not os.path.exists(model_path):
+                server.add_system_log('warning', f"Model file not found at {model_path}. Using random weights.")
+                # The script will proceed with a warning, using a randomly initialized model.
 
-        chart = {
-            'id': len(generated_charts) + 1,
-            'title': params['title'],
-            'artist': params['artist'],
-            'difficulty': params['difficulty'],
-            'bpm': params['bpm'],
-            'genre': params['genre'],
-            'rating': 0,
-            'plays': 0,
-            'created_at': datetime.now().isoformat()
-        }
+            # We need the path to the audio features .npy file.
+            # This should be passed in params from the frontend after upload.
+            # For now, let's assume a placeholder convention.
+            audio_filename = secure_filename(params.get('audio_filename', f"{params['title']}.mp3"))
+            npy_path = os.path.join(UPLOAD_FOLDER, os.path.splitext(audio_filename)[0] + '.npy')
 
-        chart['chart_data'] = [1, 0, 2, 0, 1, 2, 1, 0] * 50 # Dummy chart data
-        generated_charts.append(chart)
-        evaluation_queue.append(chart)
-        
-        # Log analysis metrics as experiment results
-        analysis = server.pattern_analyzer.analyze_generated_chart(chart['chart_data'], None)
-        for key, value in analysis.items():
-            server.experiment_tracker.log_metric(run_id, key, value)
+            if not os.path.exists(npy_path):
+                server.add_system_log('error', f"Could not find feature file: {npy_path}")
+                raise FileNotFoundError(f"Feature file not found for {audio_filename}")
 
-        server.generation_active = False
-        socketio.emit('chart_generated', {'chart': chart})
+            output_filename = f"{secure_filename(params['title'])}_{uuid.uuid4().hex[:8]}.osu"
+            output_path = os.path.join(CHART_OUTPUT_FOLDER, output_filename)
+
+            command = [
+                sys.executable,
+                os.path.join(BASE_DIR, 'generate_chart.py'),
+                model_path,
+                npy_path,
+                output_path,
+                '--difficulty', params['difficulty'],
+                '--title', params['title'],
+                '--artist', params['artist'],
+            ]
+
+            logger.info(f"Running command: {shlex.join(command)}")
+            process = subprocess.run(command, capture_output=True, text=True, check=False)
+
+            if process.returncode != 0:
+                error_msg = f"Chart generation script failed: {process.stderr or process.stdout}"
+                server.add_system_log('error', error_msg)
+                raise Exception(error_msg)
+
+            socketio.emit('generation_progress', {'progress': 90})
+
+            chart = {
+                'id': len(generated_charts) + 1,
+                'title': params['title'],
+                'artist': params['artist'],
+                'difficulty': params['difficulty'],
+                'bpm': params['bpm'],
+                'genre': params['genre'],
+                'rating': 0,
+                'plays': 0,
+                'created_at': datetime.now().isoformat(),
+                'filename': output_filename
+            }
+
+            generated_charts.append(chart)
+            evaluation_queue.append(chart)
+
+            server.add_system_log('success', f"Chart '{params['title']}' generated successfully.")
+            socketio.emit('generation_progress', {'progress': 100})
+            socketio.emit('chart_generated', {'chart': chart})
+
+        except Exception as e:
+            logger.error(f"Chart generation task failed: {e}")
+            server.add_system_log('error', f"Generation failed: {e}")
+        finally:
+            server.generation_active = False
 
     server.task_manager.submit_task(generation_task)
 
