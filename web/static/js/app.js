@@ -959,10 +959,7 @@ function exportAllCharts() {
     }
 }
 
-// Initialize the application when DOM is loaded
-document.addEventListener('DOMContentLoaded', () => {
-    window.taikoApp = new TaikoNationApp();
-});
+// (Initialization moved to the end of this file to ensure all classes are defined)
 class TaikoNationUI {
   constructor() {
     this.socket = null;
@@ -1303,50 +1300,239 @@ class TaikoNationUI {
     });
   }
 
-  showToast(message, type = 'info', options = {}) {
-    const container = document.getElementById('toast-container');
-    const toast = document.createElement('div');
+    // Minimal event listeners to wire UI controls referenced in init()
+    setupEventListeners() {
+        // Generation button
+        const genBtn = document.getElementById('generate-btn') || document.querySelector('.generate-btn');
+        if (genBtn) genBtn.addEventListener('click', () => this.generateChart());
 
-    toast.className = `toast toast-${type}`;
-    toast.innerHTML = `
-      <div class="toast-content">
-        <div class="toast-icon">
-          ${this.getToastIcon(type)}
-        </div>
-        <div class="toast-message">${message}</div>
-        ${options.action ? `
-          <button class="toast-action">${options.action.text}</button>
-        ` : ''}
-        <button class="toast-close">×</button>
-      </div>
-    `;
+        // Search/filter inputs
+        const search = document.getElementById('chart-search');
+        if (search) {
+            search.addEventListener('input', (e) => {
+                this.filters.search = e.target.value || '';
+                this.renderCharts();
+            });
+        }
 
-    // Event listeners
-    toast.querySelector('.toast-close').addEventListener('click', () => {
-      this.removeToast(toast);
-    });
+        const sortSelect = document.getElementById('chart-sort');
+        if (sortSelect) {
+            sortSelect.addEventListener('change', (e) => {
+                this.filters.sort = e.target.value;
+                this.renderCharts();
+            });
+        }
 
-    if (options.action) {
-      toast.querySelector('.toast-action').addEventListener('click', () => {
-        options.action.callback();
-        this.removeToast(toast);
-      });
+        // Difficulty filters (checkboxes)
+        const diffCheckboxes = document.querySelectorAll('.difficulty-filter');
+        if (diffCheckboxes.length > 0) {
+            diffCheckboxes.forEach(cb => cb.addEventListener('change', () => {
+                this.filters.difficulties = Array.from(diffCheckboxes).filter(c => c.checked).map(c => c.value);
+                this.renderCharts();
+            }));
+        }
     }
 
-    container.appendChild(toast);
+    // Load some initial data for the UI (non-blocking)
+    async loadInitialData() {
+        try {
+            const resp = await fetch('/api/charts');
+            if (resp.ok) {
+                const data = await resp.json();
+                this.charts = data.charts || [];
+                this.renderCharts();
+            }
+        } catch (e) {
+            // Not critical - just log locally
+            console.warn('Failed to load initial charts:', e);
+        }
+    }
 
-    // Auto-remove after delay
-    setTimeout(() => {
-      if (toast.parentNode) {
-        this.removeToast(toast);
-      }
-    }, options.duration || 5000);
+    // Heartbeat to keep socket alive / refresh small UI bits
+    startHeartbeat() {
+        if (!this.socket) return;
+        // Send a lightweight ping every 30s if socket is connected
+        this._heartbeatInterval = setInterval(() => {
+            try {
+                if (this.socket && this.socket.connected) {
+                    this.socket.emit('heartbeat', { ts: Date.now() });
+                }
+            } catch (e) {
+                // ignore
+            }
+        }, 30000);
+    }
 
-    // Animate in
-    requestAnimationFrame(() => {
-      toast.style.transform = 'translateX(0)';
-      toast.style.opacity = '1';
-    });
+    // Connection / progress helpers used by socket callbacks
+    updateConnectionStatus(status) {
+        const dot = document.getElementById('statusDot') || document.getElementById('connection-dot');
+        const text = document.getElementById('statusText') || document.getElementById('connection-status');
+        if (dot) {
+            dot.className = `status-dot ${status}`;
+        }
+        if (text) {
+            text.textContent = status === 'connected' ? 'Connected' : (status === 'disconnected' ? 'Disconnected' : status);
+        }
+    }
+
+    updateGenerationProgress(progress) {
+        const bar = document.getElementById('generationProgressBar') || document.querySelector('.generation-progress .progress-bar');
+        if (bar) {
+            bar.style.width = `${progress}%`;
+        }
+    }
+
+    updateTrainingProgress(progress, metrics = {}) {
+        const bar = document.getElementById('trainingProgressBar') || document.querySelector('.training-progress .progress-bar');
+        if (bar) bar.style.width = `${progress}%`;
+        // Brief activity log
+        if (progress % 10 === 0) {
+            this.addActivityLog({ level: 'info', message: `Training ${progress}%`, timestamp: new Date().toLocaleTimeString() });
+        }
+    }
+
+    // Simple upload-step helpers used by upload flow
+    showUploadProgress(show) {
+        const container = document.getElementById('uploadProgress') || document.querySelector('.upload-progress');
+        if (!container) return;
+        container.style.display = show ? 'block' : 'none';
+        const bar = container.querySelector('.progress-bar') || container;
+        if (!show && bar) bar.style.width = '0%';
+    }
+
+    nextUploadStep() {
+        // Move to next step if steps container present
+        const steps = document.querySelectorAll('.upload-step');
+        if (!steps || steps.length === 0) return;
+        for (let i = 0; i < steps.length; i++) {
+            if (steps[i].classList.contains('active')) {
+                steps[i].classList.remove('active');
+                if (steps[i+1]) steps[i+1].classList.add('active');
+                break;
+            }
+        }
+    }
+
+    resetUploadFlow() {
+        const steps = document.querySelectorAll('.upload-step');
+        if (!steps || steps.length === 0) return;
+        steps.forEach((s, idx) => {
+            s.classList.toggle('active', idx === 0);
+        });
+        this.currentUpload = null;
+        // hide progress
+        this.showUploadProgress(false);
+    }
+
+    // Toggle generation progress UI
+    showGenerationProgress(show) {
+        const container = document.getElementById('generationProgress') || document.querySelector('.generation-progress');
+        if (!container) return;
+        container.style.display = show ? 'block' : 'none';
+        const bar = container.querySelector('.progress-bar') || container;
+        if (!show && bar) bar.style.width = '0%';
+    }
+
+    // Remove a toast element
+    removeToast(toast) {
+        if (!toast) return;
+        try {
+            toast.style.opacity = '0';
+            toast.style.transform = 'translateX(20px)';
+            setTimeout(() => { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 300);
+        } catch (e) {
+            if (toast.parentNode) toast.parentNode.removeChild(toast);
+        }
+    }
+
+    // Lightweight waveform placeholder renderer
+    generateWaveform(container, chart) {
+        if (!container) return;
+        container.textContent = chart.title ? `▂▁▃▂ ${chart.title}` : '▂▁▃▂ waveform';
+    }
+
+    // Preview chart placeholder
+    previewChart(chart) {
+        // For now open the download endpoint in a new tab as a quick preview
+        if (!chart || !chart.id) return;
+        const url = `/api/download-chart?id=${chart.id}`;
+        window.open(url, '_blank');
+    }
+
+    // Simple rating modal stub (could be replaced by real modal)
+    showRatingModal(chart) {
+        const rating = prompt(`Rate chart "${chart.title}" (1-5):`, '4');
+        if (rating) {
+            fetch('/api/submit-rating', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ chart_id: chart.id, rating: parseInt(rating) })
+            }).then(r => {
+                if (r.ok) this.showToast('Rating submitted', 'success');
+                else this.showToast('Failed to submit rating', 'error');
+            }).catch(() => this.showToast('Failed to submit rating', 'error'));
+        }
+    }
+
+  showToast(message, type = 'info', options = {}) {
+        let container = document.getElementById('toast-container');
+
+        // If there's no container in the DOM yet, create one so callers don't fail
+        if (!container) {
+            try {
+                container = document.createElement('div');
+                container.id = 'toast-container';
+                container.className = 'toast-container';
+                document.body.appendChild(container);
+            } catch (e) {
+                // If DOM isn't ready or append fails, fallback to console
+                console.warn('Unable to create toast container:', e);
+                console.log(`[TOAST ${type.toUpperCase()}] ${message}`);
+                return;
+            }
+        }
+
+        const toast = document.createElement('div');
+        toast.className = `toast toast-${type}`;
+        toast.innerHTML = `
+            <div class="toast-content">
+                <div class="toast-icon">
+                    ${this.getToastIcon(type)}
+                </div>
+                <div class="toast-message">${message}</div>
+                ${options.action ? `
+                    <button class="toast-action">${options.action.text}</button>
+                ` : ''}
+                <button class="toast-close">×</button>
+            </div>
+        `;
+
+        // Event listeners (guard in case markup differs)
+        const closeBtn = toast.querySelector('.toast-close');
+        if (closeBtn) closeBtn.addEventListener('click', () => this.removeToast(toast));
+
+        if (options.action) {
+            const actionBtn = toast.querySelector('.toast-action');
+            if (actionBtn) {
+                actionBtn.addEventListener('click', () => {
+                    try { options.action.callback(); } catch (e) { console.error('Toast action error', e); }
+                    this.removeToast(toast);
+                });
+            }
+        }
+
+        container.appendChild(toast);
+
+        // Auto-remove after delay
+        setTimeout(() => {
+            if (toast.parentNode) this.removeToast(toast);
+        }, options.duration || 5000);
+
+        // Animate in
+        requestAnimationFrame(() => {
+            toast.style.transform = 'translateX(0)';
+            toast.style.opacity = '1';
+        });
   }
 
   addActivityLog(log) {
