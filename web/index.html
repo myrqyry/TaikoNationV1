@@ -197,106 +197,266 @@
 
                 <!-- Generation Page -->
                 <div id="generation-page" class="page-content hidden">
-                    <div class="section-card">
-                        <div class="section-header">
-                            <h2 class="section-title">Audio Upload</h2>
+                    <!-- Upload Tab Content -->
+                    <div class="upload-tab">
+                      <div class="upload-hero">
+                        <h1>Generate Taiko Charts</h1>
+                        <p>Upload your audio and let AI create professional beatmaps</p>
+                      </div>
+
+                      <!-- Multi-step Upload Flow -->
+                      <div class="upload-flow">
+                        <!-- Step 1: File Upload -->
+                        <div class="upload-step active" id="step-upload">
+                          <div class="step-header">
+                            <div class="step-number">1</div>
+                            <div class="step-info">
+                              <h3>Upload Audio</h3>
+                              <p>Drag & drop or click to select your music file</p>
+                            </div>
+                          </div>
+
+                          <div class="upload-zone" id="upload-zone">
+                            <div class="upload-content">
+                              <div class="upload-icon">🎵</div>
+                              <p class="upload-text">Drag your audio file here</p>
+                              <p class="upload-subtext">or click to browse</p>
+                              <input type="file" id="audio-input" accept=".mp3,.wav,.ogg,.flac,.m4a,.aac">
+                            </div>
+                            <div class="upload-progress" id="upload-progress" style="display: none;">
+                              <div class="progress-circle">
+                                <svg class="progress-ring" width="60" height="60">
+                                  <circle class="progress-ring-circle" cx="30" cy="30" r="25"></circle>
+                                </svg>
+                                <span class="progress-percentage">0%</span>
+                              </div>
+                              <p>Processing audio features...</p>
+                            </div>
+                          </div>
+
+                          <div class="file-info" id="file-info" style="display: none;">
+                            <div class="info-grid">
+                              <div class="info-item">
+                                <label>Title</label>
+                                <span id="detected-title">-</span>
+                              </div>
+                              <div class="info-item">
+                                <label>Duration</label>
+                                <span id="detected-duration">-</span>
+                              </div>
+                              <div class="info-item">
+                                <label>BPM</label>
+                                <span id="detected-bpm">-</span>
+                              </div>
+                              <div class="info-item">
+                                <label>Features</label>
+                                <span id="features-status">-</span>
+                              </div>
+                            </div>
+                          </div>
                         </div>
-                        <div class="upload-zone" onclick="document.getElementById('audioFile').click()">
-                            <div class="upload-icon">🎵</div>
-                            <h3>Drop audio files here or click to browse</h3>
-                            <p>Supported formats: MP3, WAV, OGG, FLAC</p>
-                            <input type="file" id="audioFile" style="display: none;" accept=".mp3,.wav,.ogg,.flac" multiple>
-                        </div>
-                        
-                        <form id="generationForm">
-                            <div class="form-row">
-                                <div class="form-group">
-                                    <label class="form-label">Song Title</label>
-                                    <input type="text" name="title" class="form-input" placeholder="Enter song title">
-                                </div>
-                                <div class="form-group">
-                                    <label class="form-label">Artist</label>
-                                    <input type="text" name="artist" class="form-input" placeholder="Enter artist name">
-                                </div>
+
+                        <!-- Step 2: Chart Configuration -->
+                        <div class="upload-step" id="step-configure">
+                          <div class="step-header">
+                            <div class="step-number">2</div>
+                            <div class="step-info">
+                              <h3>Configure Chart</h3>
+                              <p>Customize your beatmap settings</p>
+                            </div>
+                          </div>
+
+                          <div class="config-grid">
+                            <div class="config-group">
+                              <label for="chart-title">Title</label>
+                              <input type="text" id="chart-title" class="input-primary" placeholder="Song Title">
                             </div>
 
-                            <div class="form-row">
-                                <div class="form-group">
-                                    <label class="form-label">BPM (Auto-detected)</label>
-                                    <input type="number" name="bpm" class="form-input" value="128">
-                                </div>
-                                <div class="form-group">
-                                    <label class="form-label">Genre</label>
-                                    <select name="genre" class="form-select">
-                                        <option value="electronic">Electronic</option>
-                                        <option value="rock">Rock</option>
-                                        <option value="pop">Pop</option>
-                                        <option value="classical">Classical</option>
-                                        <option value="jazz">Jazz</option>
-                                        <option value="anime">Anime</option>
-                                    </select>
-                                </div>
+                            <div class="config-group">
+                              <label for="chart-artist">Artist</label>
+                              <input type="text" id="chart-artist" class="input-primary" placeholder="Artist Name">
                             </div>
 
-                            <div class="form-row">
-                                <div class="form-group">
-                                    <label class="form-label">Difficulty Level</label>
-                                    <select name="difficulty" class="form-select">
-                                        <option value="kantan">Kantan (Easy)</option>
-                                        <option value="futsuu">Futsuu (Normal)</option>
-                                        <option value="muzukashii">Muzukashii (Hard)</option>
-                                        <option value="oni">Oni (Expert)</option>
-                                        <option value="ura">Ura Oni (Expert+)</option>
-                                    </select>
-                                </div>
-                                <div class="form-group">
-                                    <label class="form-label">Pattern Style</label>
-                                    <select name="pattern_style" class="form-select">
-                                        <option value="balanced">Balanced</option>
-                                        <option value="technical">Technical</option>
-                                        <option value="flow">Flow-focused</option>
-                                        <option value="speed">Speed-heavy</option>
-                                        <option value="dense">Pattern-dense</option>
-                                    </select>
-                                </div>
+                            <div class="config-group">
+                              <label for="chart-bpm">BPM</label>
+                              <input type="number" id="chart-bpm" class="input-primary" min="60" max="300" placeholder="120">
                             </div>
 
-                            <div style="margin-top: 25px;">
-                                <button type="button" class="btn" onclick="generateChart()">Generate Chart</button>
-                                <button type="button" class="btn btn-secondary" onclick="batchProcess()">Batch Process</button>
+                            <div class="config-group">
+                              <label for="chart-difficulty">Difficulty</label>
+                              <div class="difficulty-selector">
+                                <button class="difficulty-btn" data-difficulty="kantan">
+                                  <div class="difficulty-color kantan"></div>
+                                  <span>Kantan</span>
+                                </button>
+                                <button class="difficulty-btn" data-difficulty="futsuu">
+                                  <div class="difficulty-color futsuu"></div>
+                                  <span>Futsuu</span>
+                                </button>
+                                <button class="difficulty-btn" data-difficulty="muzukashii">
+                                  <div class="difficulty-color muzukashii"></div>
+                                  <span>Muzukashii</span>
+                                </button>
+                                <button class="difficulty-btn selected" data-difficulty="oni">
+                                  <div class="difficulty-color oni"></div>
+                                  <span>Oni</span>
+                                </button>
+                                <button class="difficulty-btn" data-difficulty="ura">
+                                  <div class="difficulty-color ura"></div>
+                                  <span>Ura Oni</span>
+                                </button>
+                              </div>
                             </div>
-                        </form>
 
-                        <div class="progress-bar" id="generationProgress" style="margin-top: 20px; display: none;">
-                            <div class="progress-fill" id="generationProgressBar"></div>
+                            <div class="config-group advanced-options" style="display: none;">
+                              <label>Advanced Options</label>
+                              <div class="advanced-grid">
+                                <div class="toggle-group">
+                                  <label class="toggle">
+                                    <input type="checkbox" id="deterministic-mode" checked>
+                                    <span class="toggle-slider"></span>
+                                    <span class="toggle-label">Deterministic Mode</span>
+                                  </label>
+                                  <small>Generates identical charts each time (seed=42)</small>
+                                </div>
+
+                                <div class="slider-group" id="temperature-group" style="display: none;">
+                                  <label for="temperature-slider">Creativity Level</label>
+                                  <input type="range" id="temperature-slider" min="0.1" max="2.0" step="0.1" value="1.0" class="slider">
+                                  <span class="slider-value">1.0</span>
+                                </div>
+                              </div>
+                            </div>
+
+                            <button class="btn-ghost btn-sm" id="toggle-advanced">
+                              <i class="icon-settings"></i>Advanced Options
+                            </button>
+                          </div>
                         </div>
-                    </div>
 
-                    <div class="section-card">
-                        <div class="section-header">
-                            <h2 class="section-title">Real-time Preview</h2>
-                        </div>
-                        <div id="chartPreview" style="text-align: center; padding: 40px;">
-                            <div style="display: flex; justify-content: center; gap: 20px; margin-bottom: 30px;">
-                                <div class="taiko-drum taiko-don" onclick="playSound('don')"></div>
-                                <div class="taiko-drum taiko-ka" onclick="playSound('ka')"></div>
+                        <!-- Step 3: Generation -->
+                        <div class="upload-step" id="step-generate">
+                          <div class="step-header">
+                            <div class="step-number">3</div>
+                            <div class="step-info">
+                              <h3>Generate Chart</h3>
+                              <p>AI is creating your beatmap</p>
                             </div>
-                            <p style="color: var(--text-secondary);">Click drums to test sounds • Chart preview will appear here during generation</p>
+                          </div>
+
+                          <div class="generation-status">
+                            <div class="generation-visual">
+                              <div class="taiko-drum">
+                                <div class="drum-surface">
+                                  <div class="hit-indicator" id="hit-don"></div>
+                                  <div class="hit-indicator" id="hit-ka"></div>
+                                </div>
+                              </div>
+                              <div class="generation-waves"></div>
+                            </div>
+
+                            <div class="generation-progress">
+                              <div class="progress-bar-animated">
+                                <div class="progress-fill" id="generation-progress"></div>
+                              </div>
+                              <p class="generation-text" id="generation-text">Initializing...</p>
+                            </div>
+                          </div>
                         </div>
+                      </div>
+
+                      <!-- Action Buttons -->
+                      <div class="upload-actions">
+                        <button class="btn-secondary" id="btn-back" style="display: none;">Back</button>
+                        <button class="btn-primary" id="btn-next">Continue</button>
+                        <button class="btn-primary" id="btn-generate" style="display: none;">Generate Chart</button>
+                      </div>
                     </div>
                 </div>
 
                 <!-- Library Page -->
                 <div id="library-page" class="page-content hidden">
-                    <div class="section-card">
-                        <div class="section-header">
-                            <h2 class="section-title">Generated Charts</h2>
-                            <button class="btn" onclick="exportAllCharts()">Export All</button>
+                    <!-- Charts Tab Content -->
+                    <div class="charts-tab">
+                      <div class="charts-header">
+                        <div class="charts-title">
+                          <h1>Generated Charts</h1>
+                          <div class="charts-stats">
+                            <span class="stat-item">
+                              <strong id="total-charts">0</strong> charts generated
+                            </span>
+                            <span class="stat-item">
+                              <strong id="avg-rating">0.0</strong> avg rating
+                            </span>
+                          </div>
                         </div>
                         
-                        <div class="charts-grid" id="chartsGrid">
-                            <!-- Charts will be loaded dynamically -->
+                        <div class="charts-controls">
+                          <div class="search-box">
+                            <input type="text" placeholder="Search charts..." id="chart-search">
+                            <i class="icon-search"></i>
+                          </div>
+
+                          <div class="filter-dropdown">
+                            <button class="btn-secondary dropdown-trigger">
+                              <i class="icon-filter"></i>Filter
+                            </button>
+                            <div class="dropdown-menu">
+                              <label class="filter-option">
+                                <input type="checkbox" value="kantan"> Kantan
+                              </label>
+                              <label class="filter-option">
+                                <input type="checkbox" value="futsuu"> Futsuu
+                              </label>
+                              <label class="filter-option">
+                                <input type="checkbox" value="muzukashii"> Muzukashii
+                              </label>
+                              <label class="filter-option">
+                                <input type="checkbox" value="oni"> Oni
+                              </label>
+                              <label class="filter-option">
+                                <input type="checkbox" value="ura"> Ura Oni
+                              </label>
+                            </div>
+                          </div>
+
+                          <div class="sort-dropdown">
+                            <button class="btn-secondary dropdown-trigger">
+                              <i class="icon-sort"></i>Recent
+                            </button>
+                            <div class="dropdown-menu">
+                              <button class="sort-option active" data-sort="recent">Most Recent</button>
+                              <button class="sort-option" data-sort="rating">Highest Rated</button>
+                              <button class="sort-option" data-sort="title">Title A-Z</button>
+                              <button class="sort-option" data-sort="difficulty">Difficulty</button>
+                            </div>
+                          </div>
+
+                          <div class="view-toggle">
+                            <button class="view-btn active" data-view="grid">
+                              <i class="icon-grid"></i>
+                            </button>
+                            <button class="view-btn" data-view="list">
+                              <i class="icon-list"></i>
+                            </button>
+                          </div>
                         </div>
+                      </div>
+
+                      <!-- Charts Grid -->
+                      <div class="charts-grid" id="charts-grid">
+                        <!-- Chart cards inserted dynamically -->
+                      </div>
+
+                      <!-- Empty State -->
+                      <div class="empty-state" id="charts-empty" style="display: none;">
+                        <div class="empty-icon">🎵</div>
+                        <h3>No charts yet</h3>
+                        <p>Upload some audio files to generate your first beatmaps!</p>
+                        <button class="btn-primary" onclick="switchTab('upload')">
+                          <i class="icon-upload"></i>Upload Audio
+                        </button>
+                      </div>
                     </div>
                 </div>
 

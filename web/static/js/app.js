@@ -963,3 +963,457 @@ function exportAllCharts() {
 document.addEventListener('DOMContentLoaded', () => {
     window.taikoApp = new TaikoNationApp();
 });
+class TaikoNationUI {
+  constructor() {
+    this.socket = null;
+    this.currentUpload = null;
+    this.activeGenerations = new Map();
+    this.charts = [];
+    this.filters = {
+      search: '',
+      difficulties: [],
+      sort: 'recent'
+    };
+
+    this.init();
+  }
+
+  async init() {
+    this.setupSocket();
+    this.setupEventListeners();
+    this.setupUploadFlow();
+    this.loadInitialData();
+    this.startHeartbeat();
+  }
+
+  setupSocket() {
+    this.socket = io({
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionAttempts: 5
+    });
+
+    // Connection status
+    this.socket.on('connect', () => {
+      this.updateConnectionStatus('connected');
+      this.showToast('Connected to TaikoNation Studio', 'success');
+    });
+
+    this.socket.on('disconnect', () => {
+      this.updateConnectionStatus('disconnected');
+      this.showToast('Connection lost. Reconnecting...', 'warning');
+    });
+
+    // Real-time progress updates
+    this.socket.on('generation_progress', (data) => {
+      this.updateGenerationProgress(data.progress);
+      if (data.progress === 100) {
+        this.showToast('Chart generation completed!', 'success');
+      }
+    });
+
+    this.socket.on('training_progress', (data) => {
+      this.updateTrainingProgress(data.progress, data.metrics);
+    });
+
+    // System logs
+    this.socket.on('system_log', (log) => {
+      this.addActivityLog(log);
+    });
+
+    // Chart generation completion
+    this.socket.on('chart_generated', (data) => {
+      this.onChartGenerated(data.chart);
+    });
+  }
+
+  setupUploadFlow() {
+    const uploadZone = document.getElementById('upload-zone');
+    const audioInput = document.getElementById('audio-input');
+
+    // Drag & drop handling
+    uploadZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      uploadZone.classList.add('drag-over');
+    });
+
+    uploadZone.addEventListener('dragleave', () => {
+      uploadZone.classList.remove('drag-over');
+    });
+
+    uploadZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      uploadZone.classList.remove('drag-over');
+      const files = e.dataTransfer.files;
+      if (files.length > 0) {
+        this.handleFileUpload(files[0]);
+      }
+    });
+
+    // Click to upload
+    uploadZone.addEventListener('click', () => {
+      audioInput.click();
+    });
+
+    audioInput.addEventListener('change', (e) => {
+      if (e.target.files.length > 0) {
+        this.handleFileUpload(e.target.files[0]);
+      }
+    });
+  }
+
+  async handleFileUpload(file) {
+    // Validate file
+    const allowedTypes = ['audio/mp3', 'audio/wav', 'audio/ogg', 'audio/flac', 'audio/m4a', 'audio/aac'];
+    if (!allowedTypes.includes(file.type)) {
+      this.showToast('Unsupported file type', 'error');
+      return;
+    }
+
+    if (file.size > 100 * 1024 * 1024) { // 100MB limit
+      this.showToast('File too large (max 100MB)', 'error');
+      return;
+    }
+
+    // Show upload progress
+    this.showUploadProgress(true);
+
+    try {
+      const formData = new FormData();
+      formData.append('audio', file);
+
+      // Add auth token if available
+      const token = localStorage.getItem('taikonation_token');
+      const headers = {};
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      const response = await fetch('/api/upload-audio', {
+        method: 'POST',
+        headers,
+        body: formData
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Upload failed');
+      }
+
+      const result = await response.json();
+      this.currentUpload = result;
+
+      // Update UI with file info
+      this.populateFileInfo(result);
+      this.nextUploadStep();
+
+      this.showToast('Audio processed successfully!', 'success');
+
+    } catch (error) {
+      this.showToast(`Upload failed: ${error.message}`, 'error');
+    } finally {
+      this.showUploadProgress(false);
+    }
+  }
+
+  populateFileInfo(data) {
+    document.getElementById('detected-title').textContent = data.title || 'Unknown';
+    document.getElementById('detected-duration').textContent =
+      data.duration ? `${Math.round(data.duration)}s` : 'Unknown';
+    document.getElementById('detected-bpm').textContent = data.detected_bpm || 'Unknown';
+    document.getElementById('features-status').textContent =
+      data.features_extracted ? '✅ Extracted' : '❌ Failed';
+
+    // Pre-fill form
+    document.getElementById('chart-title').value = data.title || '';
+    document.getElementById('chart-bpm').value = data.detected_bpm || 120;
+
+    document.getElementById('file-info').style.display = 'block';
+  }
+
+  async generateChart() {
+    if (!this.currentUpload) {
+      this.showToast('Please upload an audio file first', 'error');
+      return;
+    }
+
+    const chartData = {
+      title: document.getElementById('chart-title').value || 'Untitled',
+      artist: document.getElementById('chart-artist').value || 'Unknown Artist',
+      bpm: parseInt(document.getElementById('chart-bpm').value) || 120,
+      difficulty: document.querySelector('.difficulty-btn.selected')?.dataset.difficulty || 'oni',
+      genre: 'electronic', // Could be made configurable
+      pattern_style: 'balanced',
+      audio_filename: this.currentUpload.filename,
+      npy_filename: this.currentUpload.npy_filename
+    };
+
+    try {
+      const token = localStorage.getItem('taikonation_token');
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      const response = await fetch('/api/generate-chart', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(chartData)
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Generation failed');
+      }
+
+      // Move to generation step
+      this.nextUploadStep();
+      this.showGenerationProgress(true);
+
+    } catch (error) {
+      this.showToast(`Generation failed: ${error.message}`, 'error');
+    }
+  }
+
+  onChartGenerated(chart) {
+    this.charts.unshift(chart);
+    this.renderCharts();
+    this.showGenerationProgress(false);
+
+    // Show success with download option
+    this.showToast(
+      `Chart "${chart.title}" generated successfully!`,
+      'success',
+      {
+        action: {
+          text: 'Download',
+          callback: () => this.downloadChart(chart.id)
+        }
+      }
+    );
+
+    // Reset upload flow
+    this.resetUploadFlow();
+  }
+
+  async downloadChart(chartId) {
+    try {
+      const token = localStorage.getItem('taikonation_token');
+      const url = new URL('/api/download-chart', window.location.origin);
+      url.searchParams.set('id', chartId);
+      if (token) {
+        url.searchParams.set('api_token', token);
+      }
+
+      // Create temporary download link
+      const link = document.createElement('a');
+      link.href = url.toString();
+      link.download = ''; // Let browser determine filename
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      this.showToast('Download started', 'info');
+
+    } catch (error) {
+      this.showToast(`Download failed: ${error.message}`, 'error');
+    }
+  }
+
+  renderCharts() {
+    const grid = document.getElementById('charts-grid');
+    const empty = document.getElementById('charts-empty');
+    const template = document.getElementById('chart-card-template');
+
+    if (this.charts.length === 0) {
+      grid.style.display = 'none';
+      empty.style.display = 'block';
+      return;
+    }
+
+    grid.style.display = 'grid';
+    empty.style.display = 'none';
+
+    // Filter and sort charts
+    let filteredCharts = this.charts.filter(chart => {
+      const matchesSearch = chart.title.toLowerCase().includes(this.filters.search.toLowerCase()) ||
+                           chart.artist.toLowerCase().includes(this.filters.search.toLowerCase());
+      const matchesDifficulty = this.filters.difficulties.length === 0 ||
+                               this.filters.difficulties.includes(chart.difficulty);
+      return matchesSearch && matchesDifficulty;
+    });
+
+    // Sort charts
+    filteredCharts.sort((a, b) => {
+      switch (this.filters.sort) {
+        case 'recent':
+          return new Date(b.created_at) - new Date(a.created_at);
+        case 'rating':
+          return (b.rating || 0) - (a.rating || 0);
+        case 'title':
+          return a.title.localeCompare(b.title);
+        case 'difficulty':
+          const diffOrder = ['kantan', 'futsuu', 'muzukashii', 'oni', 'ura'];
+          return diffOrder.indexOf(a.difficulty) - diffOrder.indexOf(b.difficulty);
+        default:
+          return 0;
+      }
+    });
+
+    // Clear grid
+    grid.innerHTML = '';
+
+    // Render charts
+    filteredCharts.forEach(chart => {
+      const card = template.content.cloneNode(true);
+
+      // Populate card data
+      card.querySelector('.chart-card').dataset.chartId = chart.id;
+      card.querySelector('.chart-title').textContent = chart.title;
+      card.querySelector('.chart-artist').textContent = chart.artist;
+      card.querySelector('.chart-bpm').textContent = `${chart.bpm} BPM`;
+      card.querySelector('.chart-rating').textContent = (chart.rating || 0).toFixed(1);
+      card.querySelector('.chart-created').textContent = this.formatDate(chart.created_at);
+
+      // Set difficulty styling
+      const difficultyColor = card.querySelector('.difficulty-color');
+      const difficultyText = card.querySelector('.difficulty-text');
+      difficultyColor.className = `difficulty-color ${chart.difficulty}`;
+      difficultyText.textContent = this.capitalizeDifficulty(chart.difficulty);
+
+      // Generate waveform visualization (placeholder)
+      this.generateWaveform(card.querySelector('.chart-waveform'), chart);
+
+      // Add event listeners
+      card.querySelector('.download-btn').addEventListener('click', () => {
+        this.downloadChart(chart.id);
+      });
+
+      card.querySelector('.preview-btn').addEventListener('click', () => {
+        this.previewChart(chart);
+      });
+
+      card.querySelector('.rate-btn').addEventListener('click', () => {
+        this.showRatingModal(chart);
+      });
+
+      grid.appendChild(card);
+    });
+  }
+
+  showToast(message, type = 'info', options = {}) {
+    const container = document.getElementById('toast-container');
+    const toast = document.createElement('div');
+
+    toast.className = `toast toast-${type}`;
+    toast.innerHTML = `
+      <div class="toast-content">
+        <div class="toast-icon">
+          ${this.getToastIcon(type)}
+        </div>
+        <div class="toast-message">${message}</div>
+        ${options.action ? `
+          <button class="toast-action">${options.action.text}</button>
+        ` : ''}
+        <button class="toast-close">×</button>
+      </div>
+    `;
+
+    // Event listeners
+    toast.querySelector('.toast-close').addEventListener('click', () => {
+      this.removeToast(toast);
+    });
+
+    if (options.action) {
+      toast.querySelector('.toast-action').addEventListener('click', () => {
+        options.action.callback();
+        this.removeToast(toast);
+      });
+    }
+
+    container.appendChild(toast);
+
+    // Auto-remove after delay
+    setTimeout(() => {
+      if (toast.parentNode) {
+        this.removeToast(toast);
+      }
+    }, options.duration || 5000);
+
+    // Animate in
+    requestAnimationFrame(() => {
+      toast.style.transform = 'translateX(0)';
+      toast.style.opacity = '1';
+    });
+  }
+
+  addActivityLog(log) {
+    const list = document.getElementById('activity-list');
+    const template = document.getElementById('activity-item-template');
+
+    const item = template.content.cloneNode(true);
+
+    // Set icon based on log level
+    const iconElement = item.querySelector('.activity-icon-inner');
+    iconElement.className = `activity-icon-inner icon-${this.getLogIcon(log.level)}`;
+
+    // Set content
+    item.querySelector('.activity-message').textContent = log.message;
+    item.querySelector('.activity-timestamp').textContent = log.timestamp;
+
+    // Add to top of list
+    list.insertBefore(item, list.firstChild);
+
+    // Limit to 50 items
+    while (list.children.length > 50) {
+      list.removeChild(list.lastChild);
+    }
+
+    // Scroll to top
+    list.scrollTop = 0;
+  }
+
+  // Utility methods
+  formatDate(dateString) {
+    const date = new Date(dateString);
+    return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+  }
+
+  capitalizeDifficulty(difficulty) {
+    const names = {
+      'kantan': 'Kantan',
+      'futsuu': 'Futsuu',
+      'muzukashii': 'Muzukashii',
+      'oni': 'Oni',
+      'ura': 'Ura Oni'
+    };
+    return names[difficulty] || difficulty;
+  }
+
+  getToastIcon(type) {
+    const icons = {
+      success: '✅',
+      error: '❌',
+      warning: '⚠️',
+      info: 'ℹ️'
+    };
+    return icons[type] || icons.info;
+  }
+
+  getLogIcon(level) {
+    const icons = {
+      success: 'check-circle',
+      error: 'x-circle',
+      warning: 'alert-triangle',
+      info: 'info'
+    };
+    return icons[level] || icons.info;
+  }
+}
+// Initialize the application when DOM is loaded
+document.addEventListener('DOMContentLoaded', () => {
+    window.taikoApp = new TaikoNationApp();
+    window.taikoUI = new TaikoNationUI();
+});
