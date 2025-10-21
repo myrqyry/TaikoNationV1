@@ -982,13 +982,14 @@ def start_chart_generation(params: Dict[str, Any]):
             if not os.path.exists(model_path):
                 server.add_system_log('warning', f"Model file not found at {model_path}. Using random weights.")
 
-            # The npy_filename is now required
+            # Use the npy_filename returned from upload, or fall back to convention
             npy_filename = params.get('npy_filename')
-            if not npy_filename:
-                server.add_system_log('error', "NPY filename not provided for chart generation.")
-                raise ValueError("NPY filename not provided.")
-
-            npy_path = os.path.join(UPLOAD_FOLDER, npy_filename)
+            if npy_filename:
+                npy_path = os.path.join(UPLOAD_FOLDER, npy_filename)
+            else:
+                # Fallback: derive from audio_filename
+                audio_filename = secure_filename(params.get('audio_filename', f"{params['title']}.mp3"))
+                npy_path = os.path.join(UPLOAD_FOLDER, os.path.splitext(audio_filename)[0] + '.npy')
 
             if not os.path.exists(npy_path):
                 server.add_system_log('error', f"Could not find feature file: {npy_path}")
