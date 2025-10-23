@@ -567,6 +567,11 @@ def index():
     """Serve the main web interface."""
     return send_from_directory('.', 'index.html')
 
+@app.route('/editor')
+def editor():
+    """Serve the chart editor interface."""
+    return send_from_directory('.', 'editor.html')
+
 @app.route('/static/<path:filename>')
 def static_files(filename):
     """Serve static files."""
@@ -746,6 +751,141 @@ def api_generate_chart():
 def api_charts():
     """Get list of generated charts."""
     return jsonify({'charts': generated_charts})
+
+
+def parse_osu_file(filepath):
+    """Parses an .osu file to extract hit object data for the editor."""
+    notes = []
+    in_hit_objects_section = False
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line == '[HitObjects]':
+                    in_hit_objects_section = True
+                    continue
+                if line.startswith('['):
+                    in_hit_objects_section = False
+                    continue
+
+                if in_hit_objects_section and line:
+                    parts = line.split(',')
+                    if len(parts) >= 5:
+                        time = int(parts[2])
+                        obj_type = int(parts[3])
+                        hit_sound = int(parts[4])
+
+                        note = {'time': time}
+                        is_finisher = obj_type & 4  # Check for finisher flag in osu!taiko
+
+                        if hit_sound == 0:
+                            note['type'] = 'big_don' if is_finisher else 'don'
+                        elif hit_sound == 8:
+                            note['type'] = 'big_ka' if is_finisher else 'ka'
+                        elif hit_sound == 4: # Finisher don
+                            note['type'] = 'big_don'
+                        elif hit_sound == 2: # Finisher ka
+                            note['type'] = 'big_ka'
+                        else:
+                            continue # Skip unsupported hit sounds
+
+                        notes.append(note)
+    except Exception as e:
+        logger.error(f"Failed to parse .osu file {filepath}: {e}")
+        return None
+    return notes
+
+@app.route('/api/chart-data')
+def api_chart_data():
+    """Get chart data for the interactive editor."""
+    chart_id = request.args.get('id', type=int)
+    if not chart_id:
+        return jsonify({'error': 'Missing chart ID'}), 400
+
+    chart = next((c for c in generated_charts if c['id'] == chart_id), None)
+    if not chart or 'filename' not in chart:
+        return jsonify({'error': 'Chart not found'}), 404
+
+    filepath = os.path.join(CHART_OUTPUT_FOLDER, chart['filename'])
+    if not os.path.exists(filepath):
+        return jsonify({'error': 'Chart file not found on disk'}), 404
+
+    notes = parse_osu_file(filepath)
+    if notes is None:
+        return jsonify({'error': 'Failed to parse chart file'}), 500
+
+    return jsonify({'notes': notes, 'metadata': chart})
+
+@app.route('/api/save-chart', methods=['POST'])
+@require_api_token
+def api_save_chart():
+    """Save modified chart data from the editor."""
+    data = request.get_json()
+    if not data or 'id' not in data or 'notes' not in data:
+        return jsonify({'error': 'Invalid request body'}), 400
+
+    chart_id = data['id']
+    chart = next((c for c in generated_charts if c['id'] == chart_id), None)
+    if not chart or 'filename' not in chart:
+        return jsonify({'error': 'Chart not found'}), 404
+
+    filepath = os.path.join(CHART_OUTPUT_FOLDER, chart['filename'])
+    if not os.path.exists(filepath):
+        return jsonify({'error': 'Chart file not found on disk'}), 404
+
+    try:
+        # Read the original file content
+        with open(filepath, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        # Find the start and end of the [HitObjects] section
+        try:
+            start_index = lines.index('[HitObjects]\n') + 1
+        except ValueError:
+            # If [HitObjects] not found, append it at the end
+            lines.append('\n[HitObjects]\n')
+            start_index = len(lines)
+
+        end_index = start_index
+        while end_index < len(lines) and not lines[end_index].startswith('['):
+            end_index += 1
+
+        # Reconstruct the hit objects from the JSON payload
+        new_hit_objects = []
+        for note in data['notes']:
+            time = note['time']
+            note_type = note.get('type', 'don')
+
+            # Default Taiko settings
+            x, y, obj_type, hit_sound, extras = 256, 192, 1, 0, '0:0:0:0:'
+
+            if note_type == 'don':
+                hit_sound = 0
+            elif note_type == 'ka':
+                hit_sound = 8
+            elif note_type == 'big_don':
+                obj_type = 5 # finisher
+                hit_sound = 4
+            elif note_type == 'big_ka':
+                obj_type = 5 # finisher
+                hit_sound = 2
+
+            new_hit_objects.append(f"{x},{y},{time},{obj_type},{hit_sound},{extras}\n")
+
+        # Replace the old hit objects with the new ones
+        new_lines = lines[:start_index] + new_hit_objects + lines[end_index:]
+
+        # Write the modified content back to the file
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.writelines(new_lines)
+
+        server.add_system_log('success', f"Chart '{chart['title']}' updated from editor.")
+        return jsonify({'success': True, 'message': 'Chart saved successfully.'})
+
+    except Exception as e:
+        logger.error(f"Failed to save chart file {filepath}: {e}")
+        return jsonify({'error': 'Failed to save chart file'}), 500
+
 
 @app.route('/api/download-chart')
 def download_chart():
