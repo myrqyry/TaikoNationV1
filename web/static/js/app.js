@@ -759,6 +759,7 @@ TaikoNationApp.prototype.addGeneratedChart = function(chart) {
                 <div class="chart-meta">${chart.artist} • ${chart.bpm} BPM</div>
                 <div class="chart-actions">
                     <a href="/api/download-chart?id=${chart.id}" class="btn btn-secondary" download>Download .osu</a>
+                    <a href="/editor?id=${chart.id}" class="btn btn-secondary">Edit</a>
                 </div>
             </div>
         `;
