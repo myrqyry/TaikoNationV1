@@ -10,6 +10,24 @@ import json
 from transformer_dataset import get_transformer_data_loaders, DIFFICULTY_MAP
 from transformer_model import TaikoTransformer
 from tokenization import TaikoTokenizer
+from datetime import datetime
+
+def save_checkpoint(model, optimizer, epoch, loss, config, path):
+    """Save training checkpoint with metadata."""
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': loss,
+        'model_config': config['model'],
+        'timestamp': datetime.now().isoformat(),
+        'pytorch_version': torch.__version__
+    }
+
+    # Save with atomic write
+    temp_path = f"{path}.tmp"
+    torch.save(checkpoint, temp_path)
+    os.replace(temp_path, path)
 
 def load_config(path="config/default.yaml"):
     with open(path, 'r') as f:
@@ -37,6 +55,7 @@ def train_fold(config, fold_idx):
     criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.vocab["[PAD]"])
     optimizer = optim.Adam(model.parameters(), lr=config['training']['learning_rate'])
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', **config['training']['scheduler'])
+    scaler = torch.cuda.amp.GradScaler()
 
     best_val_loss = float('inf')
     model_save_path = f"{config['training']['save_path']}_fold_{fold_idx + 1}.pth"
@@ -53,10 +72,13 @@ def train_fold(config, fold_idx):
             difficulty_id = batch["difficulty"].to(device)
 
             optimizer.zero_grad()
-            output = model(encoder_input, decoder_input, genre_id, difficulty_id)
-            loss = criterion(output.view(-1, tokenizer.vocab_size), target.view(-1))
-            loss.backward()
-            optimizer.step()
+            with torch.cuda.amp.autocast():
+                output = model(encoder_input, decoder_input, genre_id, difficulty_id)
+                loss = criterion(output.view(-1, tokenizer.vocab_size), target.view(-1))
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
         model.eval()
         val_loss = 0.0
@@ -78,7 +100,7 @@ def train_fold(config, fold_idx):
         wandb.log({"val_loss": val_loss, "epoch": epoch})
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), model_save_path)
+            save_checkpoint(model, optimizer, epoch, best_val_loss, config, model_save_path)
             print(f"Epoch {epoch+1}: New best model saved with val_loss: {best_val_loss:.4f}")
 
     print("--- Finished Supervised Training ---")

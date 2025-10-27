@@ -15,7 +15,7 @@ INPUT_SONG_DIR = "input_songs"
 DIFFICULTY_MAP = {"easy": 0, "normal": 1, "hard": 2, "oni": 3, "ura": 4, "unknown": 1}
 
 class TaikoTransformerDataset(Dataset):
-    def __init__(self, all_samples, indices, tokenizer, genre_vocab, is_train=True, max_sequence_length=512, time_quantization_ms=100, source_resolution_ms=23.2):
+    def __init__(self, all_samples, indices, tokenizer, genre_vocab, is_train=True, max_sequence_length=512, time_quantization_ms=100, source_resolution_ms=23.2, cache_dir='./cache'):
         self.is_train = is_train
         self.max_sequence_length = max_sequence_length
         self.tokenizer = tokenizer
@@ -23,14 +23,28 @@ class TaikoTransformerDataset(Dataset):
         self.samples = [all_samples[i] for i in indices]
         self.source_resolution_ms = source_resolution_ms
         self.time_quantization_ms = time_quantization_ms
+        self.cache_dir = cache_dir
+        os.makedirs(cache_dir, exist_ok=True)
+        self._preprocess_audio()
+
+    def _preprocess_audio(self):
+        """Pre-compute spectrograms offline before training"""
+        for i, sample in enumerate(self.samples):
+            cache_path = f"{self.cache_dir}/spec_{i}.npy"
+            if not os.path.exists(cache_path):
+                audio_features = get_audio_features(sample["song_path"], source_resolution_ms=self.source_resolution_ms, frame_duration_ms=self.time_quantization_ms)
+                if audio_features is not None:
+                    np.save(cache_path, audio_features)
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
-        audio_features = get_audio_features(sample["song_path"], source_resolution_ms=self.source_resolution_ms, frame_duration_ms=self.time_quantization_ms)
-        if audio_features is None: return None
+        cache_path = f"{self.cache_dir}/spec_{idx}.npy"
+        if not os.path.exists(cache_path):
+            return None
+        audio_features = np.load(cache_path)
 
         if self.is_train:
             audio_features = augment_spectrogram(audio_features)

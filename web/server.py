@@ -13,13 +13,17 @@ import json
 import yaml
 import asyncio
 import logging
+from logging.handlers import RotatingFileHandler
 import subprocess
 import shlex
+import signal
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 import uuid
+import magic
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -27,6 +31,31 @@ from flask import Flask, request, jsonify, render_template, send_from_directory,
 from flask_socketio import SocketIO, emit
 from marshmallow import Schema, fields, ValidationError
 from werkzeug.utils import secure_filename
+from werkzeug.security import safe_join
+from enum import Enum
+
+class Difficulty(Enum):
+    EASY = 0
+    NORMAL = 1
+    HARD = 2
+    ONI = 3
+    URA_ONI = 4
+
+def validate_difficulty(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        diff = kwargs.get('difficulty') or request.json.get('difficulty')
+        try:
+            if isinstance(diff, str):
+                kwargs['difficulty'] = Difficulty[diff.upper()]
+            elif isinstance(diff, int):
+                kwargs['difficulty'] = Difficulty(diff)
+        except (KeyError, ValueError):
+            return jsonify({
+                'error': f'Invalid difficulty. Must be one of: {[d.name for d in Difficulty]}'
+            }), 400
+        return f(*args, **kwargs)
+    return wrapper
 
 # Import existing TaikoNation modules
 try:
@@ -56,11 +85,15 @@ import numpy as np
 import librosa
 
 # Configure logging
+handler = RotatingFileHandler('taikonation.log', maxBytes=10485760, backupCount=3)
+handler.setFormatter(logging.Formatter(
+    '%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s'
+))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Flask app setup
 app = Flask(__name__)
+app.logger.addHandler(handler)
+app.logger.setLevel(logging.INFO)
 # Use environment variable for secret key in production; fallback to random if not set
 app.config['SECRET_KEY'] = os.environ.get('TAIKONATION_SECRET_KEY') or os.urandom(24)
 app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('TAIKONATION_MAX_CONTENT_LENGTH', 100 * 1024 * 1024))  # bytes
@@ -144,6 +177,7 @@ class TrainingSchema(Schema):
 
 # Global variables for managing training and generation state
 training_process = None
+training_lock = Lock()
 generation_queue = []
 system_logs = []
 active_models = {}
@@ -287,6 +321,31 @@ class PatternAnalyzer:
         """Helper to generate n-grams from a sequence."""
         return [tuple(data[i:i+n]) for i in range(len(data)-n+1)]
 
+    def extract_patterns(self, chart, window_size=16, stride=8):
+        """Extract patterns with proper boundary handling"""
+        if len(chart) == 0:
+            return []
+
+        # Handle charts shorter than window
+        if len(chart) < window_size:
+            # Pad with silence tokens
+            padded = np.pad(chart, ((0, window_size - len(chart)), (0, 0)),
+                            mode='constant', constant_values=0)
+            return [padded]
+
+        patterns = []
+        for i in range(0, len(chart) - window_size + 1, stride):
+            pattern = chart[i:i+window_size]
+            if len(pattern) == window_size:  # Safety check
+                patterns.append(pattern)
+
+        # Include final partial pattern if exists
+        if len(chart) % stride != 0:
+            final_pattern = chart[-window_size:]
+            patterns.append(final_pattern)
+
+        return patterns
+
     def measure_onset_correlation(self, chart_data, original_audio):
         """Measure onset correlation with dummy audio data."""
         # In a real implementation, original_audio would be a path to an audio file
@@ -357,12 +416,23 @@ class TaikoNationServer:
         self.setup_config_watcher()
 
     def load_default_config(self) -> Dict[str, Any]:
-        """Load the default configuration from config/default.yaml."""
+        """Safely load YAML configuration"""
         try:
             config_path = os.path.join(CONFIG_FOLDER, 'default.yaml')
             if os.path.exists(config_path):
                 with open(config_path, 'r') as f:
-                    return yaml.safe_load(f)
+                    config = yaml.safe_load(f)
+
+                # Validate config structure
+                required_sections = ['model', 'training', 'data']
+                if not all(section in config for section in required_sections):
+                    raise ValueError(f"Config missing required sections: {required_sections}")
+
+                # Validate datatypes
+                if not isinstance(config['model'].get('d_model'), int):
+                    raise ValueError("model.d_model must be an integer")
+
+                return config
         except Exception as e:
             logger.error(f"Failed to load default config: {e}")
 
@@ -625,6 +695,33 @@ def api_models():
     """Get information about available models."""
     return jsonify({'models': active_models})
 
+# Constants for file validation
+ALLOWED_EXTENSIONS = {'wav', 'mp3', 'ogg', 'flac'}
+ALLOWED_MIME_TYPES = {'audio/wav', 'audio/mpeg', 'audio/ogg', 'audio/flac'}
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+
+def validate_audio_file(file):
+    """Validate uploaded audio file with multiple checks"""
+    # Check file extension
+    filename = secure_filename(file.filename)
+    if not ('.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS):
+        raise ValueError("Invalid file extension")
+
+    # Check MIME type using magic bytes
+    mime = magic.from_buffer(file.read(2048), mime=True)
+    file.seek(0)
+    if mime not in ALLOWED_MIME_TYPES:
+        raise ValueError(f"Invalid MIME type: {mime}")
+
+    # Check file size
+    file.seek(0, os.SEEK_END)
+    size = file.tell()
+    file.seek(0)
+    if size > MAX_FILE_SIZE or size == 0:
+        raise ValueError(f"Invalid file size: {size}")
+
+    return filename
+
 @app.route('/api/upload-audio', methods=['POST'])
 @require_api_token
 def api_upload_audio():
@@ -638,63 +735,67 @@ def api_upload_audio():
 
     if file:
         try:
-            # Secure the filename
-            filename = secure_filename(file.filename)
-            if not filename:  # NEW: Check if filename becomes empty
-                return jsonify({'error': 'Invalid filename'}), 400
+            filename = validate_audio_file(file)
 
-            # Validate extension server-side
-            ALLOWED_EXT = {'.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac'}
-            ext = os.path.splitext(filename.lower())[1]
-            if ext not in ALLOWED_EXT:
-                return jsonify({'error': 'Unsupported file type'}), 400
-
-            filepath = os.path.join(UPLOAD_FOLDER, filename)
-
-            # Save the uploaded file
-            file.save(filepath)
+            # Save to isolated directory with random name
+            safe_path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4()}_{filename}")
+            file.save(safe_path)
 
             # Process the audio file
-            audio_data = process_uploaded_audio(filepath)
+            audio_data = process_uploaded_audio(safe_path)
 
             server.add_system_log('success', f'Audio file processed: {filename}')
 
             return jsonify({
                 'success': True,
                 'filename': filename,
-                'npy_filename': audio_data.get('npy_filename'),  # NEW: include .npy filename
+                'npy_filename': audio_data.get('npy_filename'),
                 'title': extract_title_from_filename(filename),
                 'detected_bpm': audio_data.get('bpm'),
                 'duration': audio_data.get('duration'),
                 'features_extracted': audio_data.get('features_extracted', False)
             })
 
-        except Exception as e:
+        except (ValueError, Exception) as e:
             logger.error(f"Audio upload error: {e}")
             server.add_system_log('error', f'Audio upload failed: {str(e)}')
             return jsonify({'error': str(e)}), 500
 
 
+def run_training_job(config):
+    try:
+        start_background_training(config)
+    finally:
+        training_lock.release()
+
 @app.route('/api/start-training', methods=['POST'])
 @require_api_token
 def api_start_training():
     """Start model training."""
+    if not training_lock.acquire(blocking=False):
+        return jsonify({
+            'error': 'Training already in progress',
+            'status': 'queued'
+        }), 409
+
     try:
-        # Validate training parameters
         schema = TrainingSchema()
         training_params = schema.load(request.form)
 
-        # Start training in background
-        start_background_training(training_params)
+        training_thread = Thread(target=run_training_job, args=(training_params,))
+        training_thread.daemon = True
+        training_thread.start()
 
         server.add_system_log('success', 'Training started with custom parameters')
 
-        return jsonify({'success': True, 'message': 'Training started'})
+        return jsonify({'status': 'started', 'message': 'Training job initiated'}), 202
 
     except ValidationError as err:
+        training_lock.release()
         logger.warning(f"Invalid training parameters: {err.messages}")
         return jsonify({"error": err.messages}), 400
     except Exception as e:
+        training_lock.release()
         logger.error(f"Training start error: {e}")
         server.add_system_log('error', f'Training start failed: {str(e)}')
         return jsonify({'error': str(e)}), 500
@@ -717,10 +818,34 @@ def api_stop_training():
         logger.error(f"Training stop error: {e}")
         return jsonify({'error': str(e)}), 500
 
+# Add timeout decorator
+class TimeoutError(Exception):
+    pass
+
+def timeout_handler(signum, frame):
+    raise TimeoutError("Request timeout")
+
+def with_timeout(seconds):
+    def decorator(f):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(seconds)
+            try:
+                result = f(*args, **kwargs)
+            finally:
+                signal.alarm(0)
+            return result
+        return wrapper
+    return decorator
+
 @app.route('/api/generate-chart', methods=['POST'])
 @require_api_token
-def api_generate_chart():
+@with_timeout(300)  # 5 minute timeout
+@validate_difficulty
+def api_generate_chart(difficulty=Difficulty.ONI):
     """Generate a chart from uploaded audio."""
+    app.logger.info(f"Chart generation request: {request.json}")
     try:
         # Support both JSON and form data
         if request.is_json:
@@ -736,6 +861,7 @@ def api_generate_chart():
         start_chart_generation(params)
 
         server.add_system_log('success', f'Chart generation started: {params["title"]}')
+        app.logger.info(f"Chart generated successfully: {params['title']}")
 
         return jsonify({'success': True, 'message': 'Chart generation started'})
 
@@ -743,7 +869,7 @@ def api_generate_chart():
         logger.warning(f"Invalid chart generation parameters: {err.messages}")
         return jsonify({"error": err.messages}), 400
     except Exception as e:
-        logger.error(f"Chart generation error: {e}")
+        logger.error(f"Chart generation error: {e}", exc_info=True)
         server.add_system_log('error', f'Chart generation failed: {str(e)}')
         return jsonify({'error': str(e)}), 500
 
@@ -898,7 +1024,19 @@ def download_chart():
     if not chart or 'filename' not in chart:
         return jsonify({'error': 'Chart not found or filename missing'}), 404
 
-    return send_from_directory(CHART_OUTPUT_FOLDER, chart['filename'], as_attachment=True)
+    # Sanitize and validate path
+    filename = secure_filename(chart['filename'])
+    safe_path = safe_join(CHART_OUTPUT_FOLDER, filename)
+
+    # Ensure path is within allowed directory
+    if not safe_path or not safe_path.startswith(CHART_OUTPUT_FOLDER):
+        abort(403)
+
+    # Verify file exists and is a file
+    if not os.path.isfile(safe_path):
+        abort(404)
+
+    return send_file(safe_path, as_attachment=True)
 
 @app.route('/api/get-chart-for-evaluation')
 def api_get_chart_for_evaluation():
@@ -1150,11 +1288,17 @@ def start_chart_generation(params: Dict[str, Any]):
                 '--seed', '42',  # NEW: deterministic by default
             ]
 
-            logger.info(f"Running command: {shlex.join(command)}")
-            process = subprocess.run(command, capture_output=True, text=True, check=False)
-
-            if process.returncode != 0:
-                error_msg = f"Chart generation script failed: {process.stderr or process.stdout}"
+            logger.info(f"Running command: {command}")
+            try:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=True
+                )
+            except subprocess.CalledProcessError as e:
+                error_msg = f"FFmpeg failed: {e.stderr}"
                 server.add_system_log('error', error_msg)
                 raise Exception(error_msg)
 
