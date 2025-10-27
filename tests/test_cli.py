@@ -3,6 +3,10 @@ import subprocess
 import sys
 import unittest
 import numpy as np
+import torch
+from transformer_model import TaikoTransformer
+from tokenization import TaikoTokenizer
+from transformer_dataset import DIFFICULTY_MAP
 
 class TestCli(unittest.TestCase):
     def setUp(self):
@@ -12,8 +16,25 @@ class TestCli(unittest.TestCase):
         np.save(self.sample_npy_path, np.random.rand(100, 80))
         # Create a dummy model file
         self.model_path = "tests/dummy_model.pth"
-        with open(self.model_path, "w") as f:
-            f.write("dummy model")
+        config = {
+            'model': {
+                'd_model': 256,
+                'nhead': 8,
+                'num_encoder_layers': 6,
+                'num_decoder_layers': 6,
+                'dim_feedforward': 1024,
+                'dropout': 0.1,
+                'audio_feature_size': 80,
+                'max_sequence_length': 512
+            }
+        }
+        model = TaikoTransformer(
+            vocab_size=TaikoTokenizer().vocab_size,
+            num_genres=10,
+            num_difficulties=len(DIFFICULTY_MAP),
+            **config['model']
+        )
+        torch.save({'model_state_dict': model.state_dict()}, self.model_path)
 
     def tearDown(self):
         if os.path.exists(self.sample_npy_path):

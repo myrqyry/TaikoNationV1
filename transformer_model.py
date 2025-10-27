@@ -56,6 +56,9 @@ class TaikoTransformer(nn.Module):
         # Final output layer
         self.fc_out = nn.Linear(d_model, vocab_size)
 
+        # Compile the model for a significant speedup
+        self.forward = torch.compile(self.forward, mode="max-autotune")
+
     def _generate_square_subsequent_mask(self, sz):
         """Generates a causal mask for the decoder."""
         mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
@@ -106,7 +109,8 @@ class TaikoTransformer(nn.Module):
         # src_key_padding_mask and tgt_key_padding_mask would go here.
 
         # --- Transformer Pass ---
-        output = self.transformer(src, tgt, tgt_mask=tgt_mask)
+        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.FLASH_ATTENTION):
+            output = self.transformer(src, tgt, tgt_mask=tgt_mask)
 
         # --- Final Output ---
         return self.fc_out(output)

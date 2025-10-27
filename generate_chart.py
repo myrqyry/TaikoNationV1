@@ -42,13 +42,21 @@ def load_model(checkpoint_path, config, device):
     ).to(device)
 
     # Load the trained weights
-    # Note: This will fail until a model is trained and saved.
-    # For initial development, we can comment this out and use the randomly initialized model.
-    # model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    if os.path.exists(checkpoint_path):
+        # Use weights_only=True for security
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+        # It's good practice to save model's state_dict in a dictionary
+        if 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            model.load_state_dict(checkpoint)
+    else:
+        print(f"Warning: Model checkpoint not found at {checkpoint_path}. Using random weights.")
 
     model.eval()
     return model
 
+@torch.no_grad()
 def generate_chart(model, audio_features, tokenizer, difficulty_id, config, device, temperature=1.0):
     """Generates a chart token sequence from audio features."""
     print("Generating chart...")
