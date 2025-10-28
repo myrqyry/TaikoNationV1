@@ -56,8 +56,13 @@ class TaikoTransformer(nn.Module):
         # Final output layer
         self.fc_out = nn.Linear(d_model, vocab_size)
 
-        # Compile the model for a significant speedup
-        self.forward = torch.compile(self.forward, mode="max-autotune")
+        self._compiled = False
+
+    def compile_model_if_needed(self):
+        """Compile model once for optimization"""
+        if not self._compiled:
+            self.forward = torch.compile(self.forward, mode="max-autotune")
+            self._compiled = True
 
     def _generate_square_subsequent_mask(self, sz):
         """Generates a causal mask for the decoder."""
