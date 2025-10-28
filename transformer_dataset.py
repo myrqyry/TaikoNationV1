@@ -44,20 +44,38 @@ class TaikoTransformerDataset(Dataset):
         cache_path = f"{self.cache_dir}/spec_{idx}.npy"
         if not os.path.exists(cache_path):
             return None
-        audio_features = np.load(cache_path)
+        try:
+            audio_features = np.load(cache_path)
+        except (IOError, ValueError) as e:
+            print(f"Warning: Could not load audio cache file {cache_path}: {e}")
+            return None
+
+        if audio_features.ndim != 2 or audio_features.shape[0] == 0:
+            print(f"Warning: Corrupt audio features in {cache_path}, shape is {audio_features.shape}")
+            return None
 
         if self.is_train:
             audio_features = augment_spectrogram(audio_features)
 
-        token_ids = self.tokenizer.tokenize(sample["chart_path"])
-        if not token_ids: return None
+        try:
+            token_ids = self.tokenizer.tokenize(sample["chart_path"])
+        except Exception as e:
+            print(f"Warning: Could not tokenize chart {sample['chart_path']}: {e}")
+            return None
+        if not token_ids:
+            print(f"Warning: Tokenization resulted in empty sequence for {sample['chart_path']}")
+            return None
 
         min_len = min(len(audio_features), len(token_ids))
+        if min_len == 0:
+            return None
+
         audio_features = audio_features[:min_len]
         token_ids = token_ids[:min_len]
 
         if audio_features.shape[0] < self.max_sequence_length:
-            padding = np.zeros((self.max_sequence_length - audio_features.shape[0], audio_features.shape[1]))
+            pad_width = self.max_sequence_length - audio_features.shape[0]
+            padding = np.zeros((pad_width, audio_features.shape[1]))
             audio_features = np.vstack([audio_features, padding])
         else:
             audio_features = audio_features[:self.max_sequence_length]
@@ -67,12 +85,20 @@ class TaikoTransformerDataset(Dataset):
         else:
             token_ids = token_ids[:self.max_sequence_length]
 
-        encoder_input = torch.from_numpy(audio_features).float()
-        decoder_input = torch.tensor([self.tokenizer.vocab["[CLS]"]] + token_ids[:-1], dtype=torch.long)
-        target = torch.tensor(token_ids, dtype=torch.long)
+        try:
+            encoder_input = torch.from_numpy(audio_features).float()
+            decoder_input = torch.tensor([self.tokenizer.vocab["[CLS]"]] + token_ids[:-1], dtype=torch.long)
+            target = torch.tensor(token_ids, dtype=torch.long)
 
-        difficulty_label = torch.tensor(DIFFICULTY_MAP.get(sample.get("difficulty", "unknown").lower(), 1), dtype=torch.long)
-        genre_id = torch.tensor(self.genre_vocab.get(sample.get("genre", "unknown"), 0), dtype=torch.long)
+            difficulty_label = torch.tensor(DIFFICULTY_MAP.get(sample.get("difficulty", "unknown").lower(), 1), dtype=torch.long)
+            genre_id = torch.tensor(self.genre_vocab.get(sample.get("genre", "unknown"), 0), dtype=torch.long)
+
+            if encoder_input.shape[0] != self.max_sequence_length or decoder_input.shape[0] != self.max_sequence_length or target.shape[0] != self.max_sequence_length:
+                print(f"Warning: Mismatched sequence lengths for sample {idx}. Skipping.")
+                return None
+        except Exception as e:
+            print(f"Warning: Error creating tensors for sample {idx}: {e}")
+            return None
 
         return {"encoder_input": encoder_input, "decoder_input": decoder_input, "target": target, "difficulty": difficulty_label, "genre_id": genre_id}
 

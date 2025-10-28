@@ -3,10 +3,17 @@
 # This file contains the core dependencies for the TaikoNationV1 project.
 # These packages are required for training models and generating charts.
 
-torch>=2.0.0
-PyYAML>=6.0
-numpy>=1.22.0
-librosa>=0.10.0
-transformers>=4.35.0
-wandb
-scikit-learn
+# Pin versions to avoid supply chain attacks
+torch==2.3.0
+PyYAML==6.0.1
+numpy==1.26.4
+librosa==0.10.1
+transformers==4.36.2
+wandb==0.16.1
+scikit-learn==1.3.2
+python-magic==0.4.27
+flask==3.0.0
+flask-socketio==5.3.6
+marshmallow==3.20.1
+werkzeug==3.0.1
+watchdog==3.0.0

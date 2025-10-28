@@ -10,6 +10,7 @@ for training, generation, evaluation, and configuration management.
 import os
 import sys
 import json
+import re
 import yaml
 import asyncio
 import logging
@@ -20,14 +21,16 @@ import signal
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from concurrent.futures import ThreadPoolExecutor
-from threading import Lock
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+import multiprocessing as mp
+from threading import Lock, RLock
 import uuid
 import magic
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from dataclasses import dataclass, field
 
-from flask import Flask, request, jsonify, render_template, send_from_directory, send_file
+from flask import Flask, request, jsonify, render_template, send_from_directory, send_file, abort
 from flask_socketio import SocketIO, emit
 from marshmallow import Schema, fields, ValidationError
 from werkzeug.utils import secure_filename
@@ -66,15 +69,10 @@ try:
     from transformer_model import TaikoTransformer
     from transformer_dataset import get_transformer_data_loaders, DIFFICULTY_MAP
     from tokenization import TaikoTokenizer
+    from config_schema import ConfigSchema
     # Do NOT import train_transformer at module import time: it may import heavy deps (wandb)
     # which can pull eventlet and trigger ssl-related import-time errors in some environments.
     load_training_config = None
-
-    # Import legacy model if available
-    try:
-        import model as legacy_model
-    except ImportError:
-        legacy_model = None
 
 except ImportError as e:
     print(f"Warning: Could not import TaikoNation modules: {e}")
@@ -84,16 +82,28 @@ import torch
 import numpy as np
 import librosa
 
-# Configure logging
-handler = RotatingFileHandler('taikonation.log', maxBytes=10485760, backupCount=3)
-handler.setFormatter(logging.Formatter(
-    '%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s'
-))
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+def setup_logging(log_level='INFO'):
+    """Set up comprehensive logging"""
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
+    )
+    # File handler with rotation
+    file_handler = RotatingFileHandler(
+        'taikonation.log', maxBytes=10*1024*1024, backupCount=5
+    )
+    file_handler.setFormatter(formatter)
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    # Root logger config
+    root_logger = logging.getLogger()
+    root_logger.setLevel(getattr(logging, log_level.upper()))
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+    return root_logger
+
+logger = setup_logging()
 app = Flask(__name__)
-app.logger.addHandler(handler)
-app.logger.setLevel(logging.INFO)
 # Use environment variable for secret key in production; fallback to random if not set
 app.config['SECRET_KEY'] = os.environ.get('TAIKONATION_SECRET_KEY') or os.urandom(24)
 app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('TAIKONATION_MAX_CONTENT_LENGTH', 100 * 1024 * 1024))  # bytes
@@ -175,15 +185,69 @@ class TrainingSchema(Schema):
     batch_size = fields.Int(load_default=8)
 
 
-# Global variables for managing training and generation state
-training_process = None
-training_lock = Lock()
-generation_queue = []
-system_logs = []
-active_models = {}
-generated_charts = []
-evaluation_queue = []
+@dataclass
+class ServerState:
+    """Thread-safe server state management"""
+    training_process: Any = None
+    generation_queue: List[Dict] = field(default_factory=list)
+    system_logs: List[Dict] = field(default_factory=list)
+    active_models: Dict[str, Any] = field(default_factory=dict)
+    generated_charts: List[Dict] = field(default_factory=list)
+    evaluation_queue: List[Dict] = field(default_factory=list)
+    _lock: RLock = field(default_factory=RLock, init=False)
 
+    def add_chart(self, chart):
+        with self._lock:
+            self.generated_charts.append(chart)
+
+    def get_charts(self):
+        with self._lock:
+            return self.generated_charts.copy()
+
+    def add_log(self, level, message):
+        with self._lock:
+            self.system_logs.insert(0, {
+                'timestamp': datetime.now().isoformat(),
+                'level': level,
+                'message': message
+            })
+            self.system_logs = self.system_logs[:100]  # Keep last 100
+
+# Replace global variables with singleton state
+_server_state = ServerState()
+
+
+class AudioProcessor:
+    def __init__(self, max_workers=None):
+        self.executor = ProcessPoolExecutor(max_workers=max_workers or mp.cpu_count())
+
+    def process_audio_async(self, filepath, config):
+        """Process audio in background"""
+        future = self.executor.submit(self._process_audio_worker, filepath, config)
+        return future
+
+    @staticmethod
+    def _process_audio_worker(filepath, config):
+        """Worker function for audio processing"""
+        try:
+            y, sr = librosa.load(filepath, sr=22050)  # Standardize sample rate
+            # Use more efficient STFT computation
+            S = librosa.stft(y, n_fft=2048, hop_length=512)
+            mel_spec = librosa.feature.melspectrogram(
+                S=np.abs(S)**2,
+                sr=sr,
+                n_mels=config['audio_feature_size']
+            )
+            # Log-scale and normalize
+            features = librosa.power_to_db(mel_spec, ref=np.max)
+            features = (features - features.mean()) / (features.std() + 1e-8)
+            return {
+                'features': features.T,  # Transpose for sequence-first format
+                'duration': len(y) / sr,
+                'sample_rate': sr
+            }
+        except Exception as e:
+            return {'error': str(e)}
 
 class TaskManager:
     def __init__(self, max_workers=2):
@@ -402,7 +466,7 @@ class TaikoNationServer:
     """Main server class that manages the TaikoNation web interface."""
 
     def __init__(self):
-        self.config = self.load_default_config()
+        self.config = self.load_and_validate_config()
         self.tokenizer = None
         self.models = {}
         self.training_active = False
@@ -411,30 +475,22 @@ class TaikoNationServer:
         self.experiment_tracker = ExperimentTracker()
         self.pattern_analyzer = PatternAnalyzer()
         self.hrlf_collector = HRLFCollector()
+        self.audio_processor = AudioProcessor()
 
         self.initialize_components()
         self.setup_config_watcher()
 
-    def load_default_config(self) -> Dict[str, Any]:
-        """Safely load YAML configuration"""
+    def load_and_validate_config(self, config_path=None) -> Dict[str, Any]:
+        """Safely load and validate YAML configuration"""
+        config_path = config_path or os.path.join(CONFIG_FOLDER, 'default.yaml')
         try:
-            config_path = os.path.join(CONFIG_FOLDER, 'default.yaml')
             if os.path.exists(config_path):
                 with open(config_path, 'r') as f:
-                    config = yaml.safe_load(f)
-
-                # Validate config structure
-                required_sections = ['model', 'training', 'data']
-                if not all(section in config for section in required_sections):
-                    raise ValueError(f"Config missing required sections: {required_sections}")
-
-                # Validate datatypes
-                if not isinstance(config['model'].get('d_model'), int):
-                    raise ValueError("model.d_model must be an integer")
-
-                return config
-        except Exception as e:
-            logger.error(f"Failed to load default config: {e}")
+                    config_data = yaml.safe_load(f)
+                schema = ConfigSchema()
+                return schema.load(config_data)
+        except (ValidationError, FileNotFoundError, Exception) as e:
+            logger.error(f"Failed to load or validate config: {e}")
 
         # Return default config if file loading fails
         return {
@@ -471,6 +527,8 @@ class TaikoNationServer:
         try:
             self.tokenizer = TaikoTokenizer()
             self.load_available_models()
+            if 'transformer' in self.models and self.models['transformer']:
+                self.models['transformer'].compile_model_if_needed()
             self.add_system_log('success', 'TaikoNation components initialized successfully')
         except Exception as e:
             logger.error(f"Failed to initialize components: {e}")
@@ -495,8 +553,7 @@ class TaikoNationServer:
         logger.info(f"Found {len(model_files)} model files: {model_files}")
 
         # Update active_models global variable
-        global active_models
-        active_models = {
+        _server_state.active_models = {
             'transformer': {
                 'name': 'PyTorch Transformer',
                 'type': 'modern',
@@ -507,44 +564,34 @@ class TaikoNationServer:
                 'name': 'TensorFlow CNN-LSTM',
                 'type': 'legacy',
                 'accuracy': 87.8,
-                'status': 'ready' if legacy_model else 'not_available'
+                'status': 'not_available'
             }
         }
 
     def add_system_log(self, level: str, message: str):
         """Add a system log entry."""
-        global system_logs
-
-        log_entry = {
+        _server_state.add_log(level, message)
+        socketio.emit('system_log', {
             'timestamp': datetime.now().strftime('%H:%M:%S'),
             'level': level,
             'message': message
-        }
-
-        system_logs.insert(0, log_entry)
-
-        # Keep only the last 100 log entries
-        system_logs = system_logs[:100]
-
-        # Emit to connected clients
-        socketio.emit('system_log', log_entry)
-
+        })
         logger.info(f"[{level.upper()}] {message}")
 
     def get_model_comparison_data(self):
         """Get model comparison data."""
         return {
             'transformer_vs_legacy': {
-                'accuracy': [m['accuracy'] for m in active_models.values()],
-                'pattern_diversity': [np.random.rand() for _ in active_models],
+                'accuracy': [m['accuracy'] for m in _server_state.active_models.values()],
+                'pattern_diversity': [np.random.rand() for _ in _server_state.active_models],
             }
         }
 
     def get_pattern_evolution_metrics(self):
         """Get pattern evolution metrics over time."""
         return {
-            'timestamps': [c['created_at'] for c in generated_charts],
-            'diversity': [np.random.rand() for _ in generated_charts]
+            'timestamps': [c['created_at'] for c in _server_state.get_charts()],
+            'diversity': [np.random.rand() for _ in _server_state.get_charts()]
         }
 
     def get_rlhf_statistics(self):
@@ -560,7 +607,7 @@ class TaikoNationServer:
 
     def get_annotated_charts(self):
         """Get annotated charts."""
-        return generated_charts
+        return _server_state.get_charts()
 
     def get_evaluation_data(self):
         """Get evaluation data."""
@@ -573,7 +620,7 @@ class TaikoNationServer:
     def get_processed_audio_features(self):
         """Get processed audio features."""
         # This is a placeholder, as we don't store the features
-        return [{"chart_id": c['id'], "feature_shape": [1000, 80]} for c in generated_charts]
+        return [{"chart_id": c['id'], "feature_shape": [1000, 80]} for c in _server_state.get_charts()]
 
 class ConfigWatcher(FileSystemEventHandler):
     def __init__(self, server_instance):
@@ -672,7 +719,7 @@ def api_status():
     """Get system status."""
     return jsonify({
         'status': 'ready',
-        'models_loaded': len(active_models),
+        'models_loaded': len(_server_state.active_models),
         'training_active': server.training_active,
         'generation_active': server.generation_active
     })
@@ -682,18 +729,18 @@ def api_dashboard():
     """Get dashboard data."""
     return jsonify({
         'metrics': {
-            'active_models': len([m for m in active_models.values() if m['status'] == 'ready']),
-            'generated_charts': len(generated_charts),
-            'best_accuracy': max([m['accuracy'] for m in active_models.values()]),
+            'active_models': len([m for m in _server_state.active_models.values() if m['status'] == 'ready']),
+            'generated_charts': len(_server_state.get_charts()),
+            'best_accuracy': max([m['accuracy'] for m in _server_state.active_models.values()]),
             'avg_rating': calculate_average_rating()
         },
-        'recent_logs': system_logs[:10]
+        'recent_logs': _server_state.system_logs[:10]
     })
 
 @app.route('/api/models')
 def api_models():
     """Get information about available models."""
-    return jsonify({'models': active_models})
+    return jsonify({'models': _server_state.active_models})
 
 # Constants for file validation
 ALLOWED_EXTENSIONS = {'wav', 'mp3', 'ogg', 'flac'}
@@ -701,25 +748,29 @@ ALLOWED_MIME_TYPES = {'audio/wav', 'audio/mpeg', 'audio/ogg', 'audio/flac'}
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
 def validate_audio_file(file):
-    """Validate uploaded audio file with multiple checks"""
-    # Check file extension
+    """Enhanced validation with full file scanning"""
     filename = secure_filename(file.filename)
     if not ('.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS):
         raise ValueError("Invalid file extension")
-
-    # Check MIME type using magic bytes
-    mime = magic.from_buffer(file.read(2048), mime=True)
+    # Read entire file content for validation
+    content = file.read()
     file.seek(0)
+    # Validate full file MIME type, not just header
+    mime = magic.from_buffer(content, mime=True)
     if mime not in ALLOWED_MIME_TYPES:
         raise ValueError(f"Invalid MIME type: {mime}")
-
-    # Check file size
-    file.seek(0, os.SEEK_END)
-    size = file.tell()
-    file.seek(0)
-    if size > MAX_FILE_SIZE or size == 0:
-        raise ValueError(f"Invalid file size: {size}")
-
+    # Additional content validation
+    if b'<?php' in content or b'<script' in content:
+        raise ValueError("Suspicious content detected")
+    # Validate with librosa to ensure it's actually processable audio
+    try:
+        temp_path = f"/tmp/{uuid.uuid4()}.tmp"
+        with open(temp_path, 'wb') as f:
+            f.write(content)
+        librosa.load(temp_path, sr=None, duration=1.0)  # Test first second
+        os.unlink(temp_path)
+    except:
+        raise ValueError("File is not valid audio")
     return filename
 
 @app.route('/api/upload-audio', methods=['POST'])
@@ -805,10 +856,9 @@ def api_start_training():
 def api_stop_training():
     """Stop model training."""
     try:
-        global training_process
-        if training_process:
+        if _server_state.training_process:
             # In a real implementation, you would properly stop the training process
-            training_process = None
+            _server_state.training_process = None
             server.training_active = False
 
         server.add_system_log('info', 'Training stopped by user')
@@ -876,7 +926,7 @@ def api_generate_chart(difficulty=Difficulty.ONI):
 @app.route('/api/charts')
 def api_charts():
     """Get list of generated charts."""
-    return jsonify({'charts': generated_charts})
+    return jsonify({'charts': _server_state.get_charts()})
 
 
 def parse_osu_file(filepath):
@@ -928,7 +978,7 @@ def api_chart_data():
     if not chart_id:
         return jsonify({'error': 'Missing chart ID'}), 400
 
-    chart = next((c for c in generated_charts if c['id'] == chart_id), None)
+    chart = next((c for c in _server_state.get_charts() if c['id'] == chart_id), None)
     if not chart or 'filename' not in chart:
         return jsonify({'error': 'Chart not found'}), 404
 
@@ -951,7 +1001,7 @@ def api_save_chart():
         return jsonify({'error': 'Invalid request body'}), 400
 
     chart_id = data['id']
-    chart = next((c for c in generated_charts if c['id'] == chart_id), None)
+    chart = next((c for c in _server_state.get_charts() if c['id'] == chart_id), None)
     if not chart or 'filename' not in chart:
         return jsonify({'error': 'Chart not found'}), 404
 
@@ -1014,25 +1064,28 @@ def api_save_chart():
 
 
 @app.route('/api/download-chart')
+@require_api_token
 def download_chart():
     """Download a generated chart file."""
     chart_id = request.args.get('id', type=int)
-    if not chart_id:
-        return jsonify({'error': 'Missing chart ID'}), 400
+    if not chart_id or chart_id <= 0:
+        return jsonify({'error': 'Invalid chart ID'}), 400
 
-    chart = next((c for c in generated_charts if c['id'] == chart_id), None)
+    chart = next((c for c in _server_state.get_charts() if c['id'] == chart_id), None)
     if not chart or 'filename' not in chart:
-        return jsonify({'error': 'Chart not found or filename missing'}), 404
+        return jsonify({'error': 'Chart not found'}), 404
 
-    # Sanitize and validate path
-    filename = secure_filename(chart['filename'])
-    safe_path = safe_join(CHART_OUTPUT_FOLDER, filename)
-
-    # Ensure path is within allowed directory
-    if not safe_path or not safe_path.startswith(CHART_OUTPUT_FOLDER):
+    # Validate filename against whitelist pattern
+    filename = chart['filename']
+    if not re.match(r'^[a-zA-Z0-9_\-\.]+\.osu$', filename):
+        logger.error(f"Suspicious filename detected: {filename}")
         abort(403)
 
-    # Verify file exists and is a file
+    # Double-check the path is within bounds
+    safe_path = os.path.realpath(os.path.join(CHART_OUTPUT_FOLDER, filename))
+    if not safe_path.startswith(os.path.realpath(CHART_OUTPUT_FOLDER)):
+        abort(403)
+
     if not os.path.isfile(safe_path):
         abort(404)
 
@@ -1041,8 +1094,8 @@ def download_chart():
 @app.route('/api/get-chart-for-evaluation')
 def api_get_chart_for_evaluation():
     """Get a chart for human evaluation."""
-    if evaluation_queue:
-        chart = evaluation_queue[0]
+    if _server_state.evaluation_queue:
+        chart = _server_state.evaluation_queue[0]
         return jsonify(chart)
     else:
         return jsonify({'error': 'No charts available for evaluation'}), 404
@@ -1065,8 +1118,8 @@ def api_submit_evaluation():
         process_evaluation(evaluation_data)
 
         # Remove evaluated chart from queue
-        if evaluation_queue:
-            evaluation_queue.pop(0)
+        if _server_state.evaluation_queue:
+            _server_state.evaluation_queue.pop(0)
 
         server.add_system_log('success', 'Evaluation submitted successfully')
 
@@ -1085,8 +1138,8 @@ def api_submit_comparative_evaluation():
         chart_b_id = request.form.get('chartB_id')
         preference = request.form.get('preference')
 
-        chart_a = next((c for c in generated_charts if c['id'] == int(chart_a_id)), None)
-        chart_b = next((c for c in generated_charts if c['id'] == int(chart_b_id)), None)
+        chart_a = next((c for c in _server_state.get_charts() if c['id'] == int(chart_a_id)), None)
+        chart_b = next((c for c in _server_state.get_charts() if c['id'] == int(chart_b_id)), None)
 
         if chart_a and chart_b:
             server.hrlf_collector.collectComparativeRating(chart_a, chart_b, preference)
@@ -1130,7 +1183,6 @@ def handle_disconnect():
     """Handle client disconnection."""
     logger.info('Client disconnected')
 
-# Helper functions
 def process_uploaded_audio(filepath: str) -> Dict[str, Any]:
     """Process uploaded audio file and extract features."""
     try:
@@ -1197,6 +1249,7 @@ def process_uploaded_audio(filepath: str) -> Dict[str, Any]:
         logger.error(f"Audio processing error: {e}")
         return {'error': str(e)}
 
+# Helper functions
 def extract_title_from_filename(filename: str) -> str:
     """Extract song title from filename."""
     # Remove extension and clean up
@@ -1206,7 +1259,7 @@ def extract_title_from_filename(filename: str) -> str:
 
 def start_background_training(params: Dict[str, Any]):
     """Start training in background."""
-    global training_process
+    _server_state.training_process = True
     server.training_active = True
     run_id = server.experiment_tracker.start_experiment(params, name="Training Run")
 
@@ -1246,6 +1299,15 @@ def lazy_load_training_utils():
         logger.warning(f'Could not lazy-load training utilities: {e}')
         return None
 
+def sanitize_subprocess_arg(arg, max_length=100):
+    """Sanitize arguments for subprocess calls"""
+    if not isinstance(arg, str):
+        arg = str(arg)
+    # Remove any shell metacharacters
+    sanitized = re.sub(r'[;&|`$(){}<>]', '', arg)
+    sanitized = sanitized[:max_length]  # Limit length
+    return sanitized
+
 def start_chart_generation(params: Dict[str, Any]):
     """Start chart generation process."""
     server.generation_active = True
@@ -1282,10 +1344,10 @@ def start_chart_generation(params: Dict[str, Any]):
                 model_path,
                 npy_path,
                 output_path,
-                '--difficulty', params['difficulty'],
-                '--title', params['title'],
-                '--artist', params['artist'],
-                '--seed', '42',  # NEW: deterministic by default
+                '--difficulty', sanitize_subprocess_arg(params['difficulty']),
+                '--title', sanitize_subprocess_arg(params['title']),
+                '--artist', sanitize_subprocess_arg(params['artist']),
+                '--seed', '42',
             ]
 
             logger.info(f"Running command: {command}")
@@ -1305,7 +1367,7 @@ def start_chart_generation(params: Dict[str, Any]):
             socketio.emit('generation_progress', {'progress': 90})
 
             chart = {
-                'id': len(generated_charts) + 1,
+                'id': len(_server_state.get_charts()) + 1,
                 'title': params['title'],
                 'artist': params['artist'],
                 'difficulty': params['difficulty'],
@@ -1317,8 +1379,8 @@ def start_chart_generation(params: Dict[str, Any]):
                 'filename': output_filename
             }
 
-            generated_charts.append(chart)
-            evaluation_queue.append(chart)
+            _server_state.add_chart(chart)
+            _server_state.evaluation_queue.append(chart)
 
             server.add_system_log('success', f"Chart '{params['title']}' generated successfully.")
             socketio.emit('generation_progress', {'progress': 100})
@@ -1339,7 +1401,7 @@ def process_evaluation(evaluation_data: Dict[str, Any]):
 
     # Update chart rating
     chart_id = int(evaluation_data['chart_id'])
-    for chart in generated_charts:
+    for chart in _server_state.get_charts():
         if chart['id'] == chart_id:
             # Calculate average rating
             ratings = [evaluation_data['fun'], evaluation_data['musicality'],
@@ -1360,10 +1422,11 @@ def update_config_from_form(form_data):
 
 def calculate_average_rating() -> float:
     """Calculate average rating across all charts."""
-    if not generated_charts:
+    charts = _server_state.get_charts()
+    if not charts:
         return 0.0
 
-    ratings = [chart.get('rating', 0) for chart in generated_charts if chart.get('rating', 0) > 0]
+    ratings = [chart.get('rating', 0) for chart in charts if chart.get('rating', 0) > 0]
     return round(sum(ratings) / len(ratings), 1) if ratings else 0.0
 
 import io
