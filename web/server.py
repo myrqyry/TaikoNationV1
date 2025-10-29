@@ -37,6 +37,8 @@ from werkzeug.utils import secure_filename
 from werkzeug.security import safe_join
 from enum import Enum
 
+from web.helpers import error_response
+
 class Difficulty(Enum):
     EASY = 0
     NORMAL = 1
@@ -216,75 +218,6 @@ class ServerState:
 # Replace global variables with singleton state
 _server_state = ServerState()
 
-
-class AudioProcessor:
-    def __init__(self, max_workers=None):
-        self.executor = ProcessPoolExecutor(max_workers=max_workers or mp.cpu_count())
-
-    def process_audio_async(self, filepath, config):
-        """Process audio in background"""
-        future = self.executor.submit(self._process_audio_worker, filepath, config)
-        return future
-
-    @staticmethod
-    def _process_audio_worker(filepath, config):
-        """Worker function for audio processing"""
-        try:
-            y, sr = librosa.load(filepath, sr=22050)  # Standardize sample rate
-            # Use more efficient STFT computation
-            S = librosa.stft(y, n_fft=2048, hop_length=512)
-            mel_spec = librosa.feature.melspectrogram(
-                S=np.abs(S)**2,
-                sr=sr,
-                n_mels=config['audio_feature_size']
-            )
-            # Log-scale and normalize
-            features = librosa.power_to_db(mel_spec, ref=np.max)
-            features = (features - features.mean()) / (features.std() + 1e-8)
-            return {
-                'features': features.T,  # Transpose for sequence-first format
-                'duration': len(y) / sr,
-                'sample_rate': sr
-            }
-        except Exception as e:
-            return {'error': str(e)}
-
-class TaskManager:
-    def __init__(self, max_workers=2):
-        self.executor = ThreadPoolExecutor(max_workers=max_workers)
-        self.active_tasks = {}
-
-    def submit_task(self, fn, *args, **kwargs):
-        if app.testing:
-            # Run synchronously in test mode to avoid race conditions
-            fn(*args, **kwargs)
-            return "test_task_id"
-
-        task_id = str(uuid.uuid4())
-        future = self.executor.submit(fn, *args, **kwargs)
-        self.active_tasks[task_id] = future
-        return task_id
-
-    def get_task_status(self, task_id):
-        if task_id in self.active_tasks:
-            future = self.active_tasks[task_id]
-            if future.done():
-                return "completed"
-            elif future.running():
-                return "running"
-            elif future.cancelled():
-                return "cancelled"
-        return "not_found"
-
-    def cancel_task(self, task_id):
-        if task_id in self.active_tasks:
-            future = self.active_tasks[task_id]
-            if future.running():
-                future.cancel()
-                del self.active_tasks[task_id]
-                return True
-        return False
-
 # Resolve folders relative to the repository root (two levels up from web/)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'input_songs')
@@ -462,6 +395,8 @@ class PatternAnalyzer:
         overlap = generated_ngrams.intersection(set(dummy_human_patterns))
         return len(overlap) / len(generated_ngrams)
 
+from concurrent.futures import ThreadPoolExecutor
+
 class TaikoNationServer:
     """Main server class that manages the TaikoNation web interface."""
 
@@ -471,14 +406,17 @@ class TaikoNationServer:
         self.models = {}
         self.training_active = False
         self.generation_active = False
-        self.task_manager = TaskManager()
         self.experiment_tracker = ExperimentTracker()
         self.pattern_analyzer = PatternAnalyzer()
         self.hrlf_collector = HRLFCollector()
-        self.audio_processor = AudioProcessor()
+        self.executor = ThreadPoolExecutor(max_workers=4)
 
         self.initialize_components()
         self.setup_config_watcher()
+
+    def submit_task(self, task_id):
+        from web.tasks import run_task, TASKS_REGISTRY
+        self.executor.submit(run_task, task_id, TASKS_REGISTRY)
 
     def load_and_validate_config(self, config_path=None) -> Dict[str, Any]:
         """Safely load and validate YAML configuration"""
@@ -752,25 +690,30 @@ def validate_audio_file(file):
     filename = secure_filename(file.filename)
     if not ('.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS):
         raise ValueError("Invalid file extension")
-    # Read entire file content for validation
-    content = file.read()
+
+    # Read file content for validation, but with a limit to avoid memory issues
+    content = file.read(1024 * 1024) # Read first 1MB
     file.seek(0)
+
     # Validate full file MIME type, not just header
     mime = magic.from_buffer(content, mime=True)
     if mime not in ALLOWED_MIME_TYPES:
         raise ValueError(f"Invalid MIME type: {mime}")
+
     # Additional content validation
     if b'<?php' in content or b'<script' in content:
         raise ValueError("Suspicious content detected")
+
     # Validate with librosa to ensure it's actually processable audio
     try:
         temp_path = f"/tmp/{uuid.uuid4()}.tmp"
-        with open(temp_path, 'wb') as f:
-            f.write(content)
+        file.save(temp_path)
         librosa.load(temp_path, sr=None, duration=1.0)  # Test first second
         os.unlink(temp_path)
-    except:
-        raise ValueError("File is not valid audio")
+    except Exception as e:
+        raise ValueError(f"File is not a valid audio file: {e}")
+
+    file.seek(0)
     return filename
 
 @app.route('/api/upload-audio', methods=['POST'])
@@ -778,11 +721,11 @@ def validate_audio_file(file):
 def api_upload_audio():
     """Handle audio file upload and processing."""
     if 'audio' not in request.files:
-        return jsonify({'error': 'No audio file provided'}), 400
+        return jsonify(error_response('No audio file provided', code='MISSING_FILE')), 400
 
     file = request.files['audio']
     if file.filename == '':
-        return jsonify({'error': 'No file selected'}), 400
+        return jsonify(error_response('No file selected', code='MISSING_FILENAME')), 400
 
     if file:
         try:
@@ -792,64 +735,59 @@ def api_upload_audio():
             safe_path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4()}_{filename}")
             file.save(safe_path)
 
-            # Process the audio file
-            audio_data = process_uploaded_audio(safe_path)
+            from web.tasks import create_task
+            # Create a task for audio processing
+            task_id = create_task('process_uploaded_audio', safe_path, server.config)
 
-            server.add_system_log('success', f'Audio file processed: {filename}')
+            server.submit_task(task_id)
 
             return jsonify({
                 'success': True,
-                'filename': filename,
-                'npy_filename': audio_data.get('npy_filename'),
-                'title': extract_title_from_filename(filename),
-                'detected_bpm': audio_data.get('bpm'),
-                'duration': audio_data.get('duration'),
-                'features_extracted': audio_data.get('features_extracted', False)
-            })
+                'task_id': task_id,
+                'message': 'Audio processing started.'
+            }), 202
 
         except (ValueError, Exception) as e:
             logger.error(f"Audio upload error: {e}")
             server.add_system_log('error', f'Audio upload failed: {str(e)}')
-            return jsonify({'error': str(e)}), 500
+            return jsonify(error_response(str(e), code='UPLOAD_FAILED')), 500
 
+@app.route('/api/tasks/<task_id>', methods=['GET'])
+def api_get_task(task_id):
+    """Get the status and result of a task."""
+    from web.tasks import get_task_status
+    task_data = get_task_status(task_id)
+    if not task_data:
+        return jsonify(error_response('Task not found', code='NOT_FOUND')), 404
+    return jsonify(task_data)
 
-def run_training_job(config):
-    try:
-        start_background_training(config)
-    finally:
-        training_lock.release()
 
 @app.route('/api/start-training', methods=['POST'])
 @require_api_token
 def api_start_training():
     """Start model training."""
-    if not training_lock.acquire(blocking=False):
-        return jsonify({
-            'error': 'Training already in progress',
-            'status': 'queued'
-        }), 409
-
     try:
         schema = TrainingSchema()
         training_params = schema.load(request.form)
 
-        training_thread = Thread(target=run_training_job, args=(training_params,))
-        training_thread.daemon = True
-        training_thread.start()
+        from web.tasks import create_task
+        task_id = create_task('start_training_task', training_params)
 
-        server.add_system_log('success', 'Training started with custom parameters')
+        server.submit_task(task_id)
 
-        return jsonify({'status': 'started', 'message': 'Training job initiated'}), 202
+        return jsonify({
+            'success': True,
+            'task_id': task_id,
+            'message': 'Training started.'
+        }), 202
 
     except ValidationError as err:
-        training_lock.release()
         logger.warning(f"Invalid training parameters: {err.messages}")
-        return jsonify({"error": err.messages}), 400
+        return jsonify(error_response('Invalid parameters', code='VALIDATION_ERROR', details=err.messages)), 400
     except Exception as e:
-        training_lock.release()
         logger.error(f"Training start error: {e}")
         server.add_system_log('error', f'Training start failed: {str(e)}')
-        return jsonify({'error': str(e)}), 500
+        return jsonify(error_response(str(e), code='TRAINING_FAILED')), 500
 
 @app.route('/api/stop-training', methods=['POST'])
 @require_api_token
@@ -891,7 +829,6 @@ def with_timeout(seconds):
 
 @app.route('/api/generate-chart', methods=['POST'])
 @require_api_token
-@with_timeout(300)  # 5 minute timeout
 @validate_difficulty
 def api_generate_chart(difficulty=Difficulty.ONI):
     """Generate a chart from uploaded audio."""
@@ -907,21 +844,25 @@ def api_generate_chart(difficulty=Difficulty.ONI):
         schema = ChartGenerationSchema()
         params = schema.load(request_data)
 
-        # Start chart generation
-        start_chart_generation(params)
+        from web.tasks import create_task
+        # Create a task for chart generation
+        task_id = create_task('start_chart_generation', params)
 
-        server.add_system_log('success', f'Chart generation started: {params["title"]}')
-        app.logger.info(f"Chart generated successfully: {params['title']}")
+        server.submit_task(task_id)
 
-        return jsonify({'success': True, 'message': 'Chart generation started'})
+        return jsonify({
+            'success': True,
+            'task_id': task_id,
+            'message': 'Chart generation started.'
+        }), 202
 
     except ValidationError as err:
         logger.warning(f"Invalid chart generation parameters: {err.messages}")
-        return jsonify({"error": err.messages}), 400
+        return jsonify(error_response('Invalid parameters', code='VALIDATION_ERROR', details=err.messages)), 400
     except Exception as e:
         logger.error(f"Chart generation error: {e}", exc_info=True)
         server.add_system_log('error', f'Chart generation failed: {str(e)}')
-        return jsonify({'error': str(e)}), 500
+        return jsonify(error_response(str(e), code='GENERATION_FAILED')), 500
 
 @app.route('/api/charts')
 def api_charts():
@@ -1069,22 +1010,20 @@ def download_chart():
     """Download a generated chart file."""
     chart_id = request.args.get('id', type=int)
     if not chart_id or chart_id <= 0:
-        return jsonify({'error': 'Invalid chart ID'}), 400
+        return jsonify(error_response('Invalid chart ID', code='INVALID_ID')), 400
 
     chart = next((c for c in _server_state.get_charts() if c['id'] == chart_id), None)
     if not chart or 'filename' not in chart:
-        return jsonify({'error': 'Chart not found'}), 404
+        return jsonify(error_response('Chart not found', code='NOT_FOUND')), 404
 
-    # Validate filename against whitelist pattern
-    filename = chart['filename']
-    if not re.match(r'^[a-zA-Z0-9_\-\.]+\.osu$', filename):
-        logger.error(f"Suspicious filename detected: {filename}")
-        abort(403)
+    # Sanitize and validate the filename to prevent traversal
+    filename = secure_filename(chart['filename'])
 
-    # Double-check the path is within bounds
-    safe_path = os.path.realpath(os.path.join(CHART_OUTPUT_FOLDER, filename))
-    if not safe_path.startswith(os.path.realpath(CHART_OUTPUT_FOLDER)):
-        abort(403)
+    # Use safe_join to prevent path traversal attacks
+    try:
+        safe_path = safe_join(CHART_OUTPUT_FOLDER, filename)
+    except Exception:
+        abort(400)
 
     if not os.path.isfile(safe_path):
         abort(404)
@@ -1183,72 +1122,6 @@ def handle_disconnect():
     """Handle client disconnection."""
     logger.info('Client disconnected')
 
-def process_uploaded_audio(filepath: str) -> Dict[str, Any]:
-    """Process uploaded audio file and extract features."""
-    try:
-        # Load audio using librosa
-        y, sr = librosa.load(filepath, sr=None)
-
-        # Extract basic information
-        duration = len(y) / float(sr) if sr and len(y) else 0.0
-
-        # BPM estimation (existing code)
-        tempo_val = None
-        try:
-            est = librosa.beat.tempo(y=y, sr=sr)
-            if hasattr(est, '__len__') and len(est) > 0:
-                tempo_val = float(est[0])
-            else:
-                tempo_val = float(est)
-        except Exception:
-            tempo_val = None
-
-        if tempo_val is None:
-            try:
-                tempo_bt, _ = librosa.beat.beat_track(y=y, sr=sr)
-                tempo_val = float(tempo_bt)
-            except Exception:
-                tempo_val = None
-
-        if tempo_val is not None:
-            if tempo_val <= 0 or tempo_val > 1000:
-                tempo_val = None
-
-        # ALWAYS extract features and save .npy file
-        features = None
-        npy_filename = None
-        try:
-            features = get_audio_features(
-                filepath,
-                source_resolution_ms=server.config['data']['source_resolution_ms'],
-                frame_duration_ms=server.config['data']['time_quantization_ms']
-            )
-
-            # Save features as .npy file alongside audio
-            if features is not None:
-                base_name = os.path.splitext(os.path.basename(filepath))[0]
-                npy_filename = f"{base_name}.npy"
-                npy_path = os.path.join(UPLOAD_FOLDER, npy_filename)
-                np.save(npy_path, features)
-                logger.info(f"Saved features to {npy_path} with shape {features.shape}")
-
-        except Exception as e:
-            logger.warning(f"Feature extraction failed for {filepath}: {e}")
-
-        logger.info(f"Processed audio {os.path.basename(filepath)} duration={duration:.2f}s detected_bpm={tempo_val}")
-
-        return {
-            'duration': duration,
-            'bpm': int(tempo_val) if tempo_val is not None else None,
-            'features_extracted': features is not None,
-            'feature_shape': features.shape if features is not None else None,
-            'npy_filename': npy_filename  # NEW: return the .npy filename for frontend
-        }
-
-    except Exception as e:
-        logger.error(f"Audio processing error: {e}")
-        return {'error': str(e)}
-
 # Helper functions
 def extract_title_from_filename(filename: str) -> str:
     """Extract song title from filename."""
@@ -1257,37 +1130,6 @@ def extract_title_from_filename(filename: str) -> str:
     title = title.replace('_', ' ').replace('-', ' ')
     return title.title()
 
-def start_background_training(params: Dict[str, Any]):
-    """Start training in background."""
-    _server_state.training_process = True
-    server.training_active = True
-    run_id = server.experiment_tracker.start_experiment(params, name="Training Run")
-
-    def training_task():
-        """Simulates a training process."""
-        for progress in range(0, 101, 5):
-            if not server.training_active:
-                break
-
-            metrics = {
-                'epoch': progress // 2,
-                'loss': 0.5 - (progress / 200),
-                'accuracy': 70 + (progress / 4),
-                'learning_rate': params['learning_rate']
-            }
-            server.experiment_tracker.log_metric(run_id, 'loss', metrics['loss'], step=metrics['epoch'])
-            server.experiment_tracker.log_metric(run_id, 'accuracy', metrics['accuracy'], step=metrics['epoch'])
-
-            socketio.emit('training_progress', {
-                'progress': progress,
-                'metrics': metrics
-            })
-            socketio.sleep(2)
-
-        server.training_active = False
-        server.add_system_log('success', 'Training completed successfully')
-
-    server.task_manager.submit_task(training_task)
 
 
 def lazy_load_training_utils():
@@ -1310,89 +1152,80 @@ def sanitize_subprocess_arg(arg, max_length=100):
 
 def start_chart_generation(params: Dict[str, Any]):
     """Start chart generation process."""
-    server.generation_active = True
-    run_id = server.experiment_tracker.start_experiment(params, name=f"Generation: {params['title']}")
+    try:
+        socketio.emit('generation_progress', {'progress': 10})
 
-    def generation_task():
-        """Runs generate_chart.py as a subprocess."""
+        model_path = os.path.join(MODEL_FOLDER, 'taiko_transformer.pth')
+        if not os.path.exists(model_path):
+            logger.warning(f"Model file not found at {model_path}. Using random weights.")
+
+        # Use the npy_filename returned from upload, or fall back to convention
+        npy_filename = params.get('npy_filename')
+        if npy_filename:
+            npy_path = os.path.join(UPLOAD_FOLDER, npy_filename)
+        else:
+            # Fallback: derive from audio_filename
+            audio_filename = secure_filename(params.get('audio_filename', f"{params['title']}.mp3"))
+            npy_path = os.path.join(UPLOAD_FOLDER, os.path.splitext(audio_filename)[0] + '.npy')
+
+        if not os.path.exists(npy_path):
+            raise FileNotFoundError(f"Feature file not found: {npy_path}")
+
+        output_filename = f"{secure_filename(params['title'])}_{uuid.uuid4().hex[:8]}.osu"
+        output_path = os.path.join(CHART_OUTPUT_FOLDER, output_filename)
+
+        command = [
+            sys.executable,
+            os.path.join(BASE_DIR, 'generate_chart.py'),
+            model_path,
+            npy_path,
+            output_path,
+            '--difficulty', sanitize_subprocess_arg(params['difficulty']),
+            '--title', sanitize_subprocess_arg(params['title']),
+            '--artist', sanitize_subprocess_arg(params['artist']),
+            '--seed', '42',
+        ]
+
+        logger.info(f"Running command: {command}")
         try:
-            socketio.emit('generation_progress', {'progress': 10})
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=True
+            )
+        except subprocess.CalledProcessError as e:
+            error_msg = f"Chart generation script failed: {e.stderr}"
+            raise Exception(error_msg)
 
-            model_path = os.path.join(MODEL_FOLDER, 'taiko_transformer.pth')
-            if not os.path.exists(model_path):
-                server.add_system_log('warning', f"Model file not found at {model_path}. Using random weights.")
+        socketio.emit('generation_progress', {'progress': 90})
 
-            # Use the npy_filename returned from upload, or fall back to convention
-            npy_filename = params.get('npy_filename')
-            if npy_filename:
-                npy_path = os.path.join(UPLOAD_FOLDER, npy_filename)
-            else:
-                # Fallback: derive from audio_filename
-                audio_filename = secure_filename(params.get('audio_filename', f"{params['title']}.mp3"))
-                npy_path = os.path.join(UPLOAD_FOLDER, os.path.splitext(audio_filename)[0] + '.npy')
+        chart = {
+            'id': len(_server_state.get_charts()) + 1,
+            'title': params['title'],
+            'artist': params['artist'],
+            'difficulty': params['difficulty'],
+            'bpm': params['bpm'],
+            'genre': params['genre'],
+            'rating': 0,
+            'plays': 0,
+            'created_at': datetime.now().isoformat(),
+            'filename': output_filename
+        }
 
-            if not os.path.exists(npy_path):
-                server.add_system_log('error', f"Could not find feature file: {npy_path}")
-                raise FileNotFoundError(f"Feature file not found: {npy_path}")
+        _server_state.add_chart(chart)
+        _server_state.evaluation_queue.append(chart)
 
-            output_filename = f"{secure_filename(params['title'])}_{uuid.uuid4().hex[:8]}.osu"
-            output_path = os.path.join(CHART_OUTPUT_FOLDER, output_filename)
+        socketio.emit('generation_progress', {'progress': 100})
+        socketio.emit('chart_generated', {'chart': chart})
 
-            command = [
-                sys.executable,
-                os.path.join(BASE_DIR, 'generate_chart.py'),
-                model_path,
-                npy_path,
-                output_path,
-                '--difficulty', sanitize_subprocess_arg(params['difficulty']),
-                '--title', sanitize_subprocess_arg(params['title']),
-                '--artist', sanitize_subprocess_arg(params['artist']),
-                '--seed', '42',
-            ]
+        return chart
 
-            logger.info(f"Running command: {command}")
-            try:
-                result = subprocess.run(
-                    command,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                    check=True
-                )
-            except subprocess.CalledProcessError as e:
-                error_msg = f"FFmpeg failed: {e.stderr}"
-                server.add_system_log('error', error_msg)
-                raise Exception(error_msg)
-
-            socketio.emit('generation_progress', {'progress': 90})
-
-            chart = {
-                'id': len(_server_state.get_charts()) + 1,
-                'title': params['title'],
-                'artist': params['artist'],
-                'difficulty': params['difficulty'],
-                'bpm': params['bpm'],
-                'genre': params['genre'],
-                'rating': 0,
-                'plays': 0,
-                'created_at': datetime.now().isoformat(),
-                'filename': output_filename
-            }
-
-            _server_state.add_chart(chart)
-            _server_state.evaluation_queue.append(chart)
-
-            server.add_system_log('success', f"Chart '{params['title']}' generated successfully.")
-            socketio.emit('generation_progress', {'progress': 100})
-            socketio.emit('chart_generated', {'chart': chart})
-
-        except Exception as e:
-            logger.error(f"Chart generation task failed: {e}")
-            server.add_system_log('error', f"Generation failed: {e}")
-        finally:
-            server.generation_active = False
-
-    server.task_manager.submit_task(generation_task)
+    except Exception as e:
+        logger.error(f"Chart generation task failed: {e}")
+        # Re-raise the exception to be caught by the task runner
+        raise
 
 def process_evaluation(evaluation_data: Dict[str, Any]):
     """Process submitted evaluation data."""
