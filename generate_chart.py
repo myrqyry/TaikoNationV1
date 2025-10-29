@@ -10,6 +10,7 @@ from transformer_model import TaikoTransformer
 from tokenization import TaikoTokenizer
 from audio_processing import get_audio_features
 from transformer_dataset import DIFFICULTY_MAP
+from web.helpers import atomic_write
 
 def load_config(config_path):
     """Loads a YAML configuration file."""
@@ -148,34 +149,36 @@ SliderTickRate:1
     # Use the tokenizer to convert IDs back to human-readable token names
     token_names = tokenizer.detokenize(token_ids)
 
-    with open(output_path, "w") as f:
-        f.write(osu_header)
+    try:
+        with atomic_write(output_path, "w") as f:
+            f.write(osu_header)
 
-        # Simple conversion of tokens to hit objects
-        # This assumes each token is a note at a fixed time interval.
-        time_interval = 200 # ms
-        current_time = 1000 # Start time
+            # Simple conversion of tokens to hit objects
+            # This assumes each token is a note at a fixed time interval.
+            time_interval = 200 # ms
+            current_time = 1000 # Start time
 
-        for token_name in token_names:
-            if token_name not in tokenizer.special_tokens and token_name != "[EMPTY]":
-                # x,y,time,type,hitSound,objectParams,hitSample
-                # For Taiko, x is always 256, y is always 192.
-                # type is a bitfield; 1 means it's a circle. All our notes are circles.
-                note_type = 1
+            for token_name in token_names:
+                if token_name not in tokenizer.special_tokens and token_name != "[EMPTY]":
+                    # x,y,time,type,hitSound,objectParams,hitSample
+                    # For Taiko, x is always 256, y is always 192.
+                    # type is a bitfield; 1 means it's a circle. All our notes are circles.
+                    note_type = 1
 
-                # hitSound is a bitfield: 0=normal, 2=whistle, 4=finish, 8=clap.
-                # 'ka' is represented by the 'clap' hitSound.
-                # 'big' notes are represented by the 'finish' hitSound.
-                hit_sound = 0
-                if "ka" in token_name:
-                    hit_sound |= 8  # Clap for ka
-                if "big" in token_name:
-                    hit_sound |= 4  # Finish for big notes
+                    # hitSound is a bitfield: 0=normal, 2=whistle, 4=finish, 8=clap.
+                    # 'ka' is represented by the 'clap' hitSound.
+                    # 'big' notes are represented by the 'finish' hitSound.
+                    hit_sound = 0
+                    if "ka" in token_name:
+                        hit_sound |= 8  # Clap for ka
+                    if "big" in token_name:
+                        hit_sound |= 4  # Finish for big notes
 
-                f.write(f"256,192,{current_time},{note_type},{hit_sound},0:0:0:0:\n")
-                current_time += time_interval
-
-    print("Chart saved successfully.")
+                    f.write(f"256,192,{current_time},{note_type},{hit_sound},0:0:0:0:\n")
+                    current_time += time_interval
+        print("Chart saved successfully.")
+    except IOError as e:
+        print(f"Error saving chart file: {e}")
 
 
 def main():
