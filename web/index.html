@@ -693,6 +693,37 @@
                 accuracyChart.update();
             }
         });
+
+        socket.on('task_update', function(task) {
+            updateTaskStatus(task.id, task);
+
+            if (task.type === 'process_uploaded_audio') {
+                updateAudioProcessingUI(task);
+            } else if (task.type === 'start_chart_generation') {
+                updateGenerationProgressUI(task);
+            }
+        });
+
+        function updateAudioProcessingUI(task) {
+            const statusElement = document.getElementById(`upload-status-${task.id}`);
+            if (!statusElement) return;
+
+            statusElement.innerHTML = `
+                <div class="progress-container">
+                    <div class="progress-bar" style="width: ${task.progress}%"></div>
+                </div>
+                <p class="status-message">${task.message}</p>
+            `;
+
+            if (task.status === 'completed') {
+                statusElement.classList.add('success');
+                // Enable chart generation button
+                document.getElementById('generate-chart-btn').disabled = false;
+            } else if (task.status === 'failed') {
+                statusElement.classList.add('error');
+                statusElement.innerHTML += `<p class="error-message">${task.error}</p>`;
+            }
+        }
     </script>
 </body>
 </html>

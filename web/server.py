@@ -1291,6 +1291,7 @@ def start_chart_generation(params: Dict[str, Any]):
         }
 
         _server_state.add_chart(chart)
+        _server_state.evaluation_queue.append(chart)
         emit_progress(100, "Chart generation complete!")
         socketio.emit('chart_generated', {'chart': chart})
 
@@ -1330,11 +1331,6 @@ def update_config_from_form(form_data):
 def calculate_average_rating() -> float:
     """Calculate average rating across all charts."""
     charts = _server_state.get_charts()
-    if not charts:
-        return 0.0
-
-    ratings = [chart.get('rating', 0) for chart in charts if chart.get('rating', 0) > 0]
-    return round(sum(ratings) / len(ratings), 1) if ratings else 0.0
 
 def emit_training_metrics(epoch, metrics):
     """Emit training metrics to connected clients"""
@@ -1346,6 +1342,8 @@ def emit_training_metrics(epoch, metrics):
         'gpu_memory_mb': metrics.get('gpu_memory_mb', 0),
         'timestamp': datetime.now().isoformat()
     })
+    if not charts:
+        return 0.0
 
     ratings = [chart.get('rating', 0) for chart in charts if chart.get('rating', 0) > 0]
     return round(sum(ratings) / len(ratings), 1) if ratings else 0.0

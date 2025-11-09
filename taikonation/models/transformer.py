@@ -100,15 +100,16 @@ class TaikoTransformer(nn.Module):
         tgt_mask = self._generate_square_subsequent_mask(tgt.size(1)).to(src.device)
 
         # Encoder pass with optional checkpointing
-        memory = self._checkpoint_forward(self.transformer_encoder, src)
+        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.FLASH_ATTENTION):
+            memory = self._checkpoint_forward(self.transformer_encoder, src)
 
-        # Decoder pass with optional checkpointing
-        output = self._checkpoint_forward(
-            self.transformer_decoder,
-            tgt_prepared,
-            memory,
-            tgt_mask=tgt_mask
-        )
+            # Decoder pass with optional checkpointing
+            output = self._checkpoint_forward(
+                self.transformer_decoder,
+                tgt_prepared,
+                memory,
+                tgt_mask=tgt_mask
+            )
 
         return self.fc_out(output)
 

@@ -91,7 +91,7 @@ def run_task(task_id: str, registry: Dict):
 
 def process_audio_with_progress(task_id: str, audio_path: str, config: Dict):
     """Process audio file with progress updates"""
-    from taikonation.data.audio_processing import get_audio_features
+    import librosa
     import numpy as np
     import os
     from web.server import logger
@@ -104,10 +104,9 @@ def process_audio_with_progress(task_id: str, audio_path: str, config: Dict):
         update_task_status(task_id, TaskStatus.RUNNING, progress=30,
                           message='Extracting audio features...')
 
-        features = get_audio_features(
-            audio_path,
-            n_mels=config['model']['audio_feature_size']
-        )
+        y, sr = librosa.load(audio_path, sr=None)
+        mel_spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=config['model']['audio_feature_size'])
+        features = np.log1p(mel_spectrogram).T
 
         update_task_status(task_id, TaskStatus.RUNNING, progress=70,
                           message='Saving feature file...')
@@ -123,7 +122,7 @@ def process_audio_with_progress(task_id: str, audio_path: str, config: Dict):
             'audio_filename': os.path.basename(audio_path),
             'npy_filename': os.path.basename(npy_path),
             'feature_shape': features.shape,
-            'duration_seconds': features.shape[0] * (config['data']['source_resolution_ms'] / 1000.0)  # ms to seconds
+            'duration_seconds': librosa.get_duration(y=y, sr=sr)
         }
 
         return result
