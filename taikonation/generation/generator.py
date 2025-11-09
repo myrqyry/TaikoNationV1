@@ -4,12 +4,11 @@ import os
 import torch
 import yaml
 import numpy as np
-from tqdm import tqdm
 
-from transformer_model import TaikoTransformer
-from tokenization import TaikoTokenizer
-from audio_processing import get_audio_features
-from transformer_dataset import DIFFICULTY_MAP
+from taikonation.models.transformer import TaikoTransformer
+from taikonation.data.tokenization import TaikoTokenizer
+from taikonation.data.audio_processing import get_audio_features
+from taikonation.data.dataset import DIFFICULTY_MAP
 from web.helpers import atomic_write
 
 def load_config(config_path):
@@ -57,50 +56,60 @@ def load_model(checkpoint_path, config, device):
     model.eval()
     return model
 
+from typing import Callable, Optional
+import math
+
 @torch.no_grad()
-def generate_chart(model, audio_features, tokenizer, difficulty_id, config, device, temperature=1.0):
-    """Generates a chart token sequence from audio features."""
-    print("Generating chart...")
+def generate_chart(
+    model,
+    audio_features,
+    tokenizer,
+    difficulty_id,
+    config,
+    device,
+    temperature=1.0,
+    progress_callback: Optional[Callable[[int, str], None]] = None
+):
+    """
+    Generate a chart with optional progress reporting.
 
+    Args:
+        progress_callback: Function to call with (progress_percent, status_message)
+    """
     model.eval()
-
-    # Prepare inputs
     encoder_input = torch.from_numpy(audio_features).float().unsqueeze(0).to(device)
-
-    # Start with a CLS token
     decoder_input = torch.tensor([[tokenizer.vocab["[CLS]"]]], dtype=torch.long).to(device)
-
     generated_tokens = []
 
-    with torch.no_grad():
-        # The loop must not exceed the model's maximum sequence length.
-        # We subtract 1 because the sequence starts with a [CLS] token.
-        max_len = config['data']['max_sequence_length']
-        for _ in tqdm(range(max_len - 1), desc="Generating tokens"):
-            # For simplicity, we use a placeholder genre_id
-            genre_id = torch.tensor([0], dtype=torch.long).to(device)
-            difficulty_tensor = torch.tensor([difficulty_id], dtype=torch.long).to(device)
+    max_len = config['data']['max_sequence_length']
 
-            # Get model output
-            output_logits = model(encoder_input, decoder_input, genre_id, difficulty_tensor)
+    if progress_callback:
+        progress_callback(5, "Initialized generation pipeline")
 
-            # Greedy decoding: get the most likely next token
-            next_token_logits = output_logits[:, -1, :]
-            if temperature != 1.0:
-                next_token_logits = next_token_logits / temperature
+    for step in range(max_len - 1):
+        genre_id = torch.tensor([0], dtype=torch.long).to(device)
+        difficulty_tensor = torch.tensor([difficulty_id], dtype=torch.long).to(device)
 
-            # Apply softmax to get probabilities
-            probabilities = torch.nn.functional.softmax(next_token_logits, dim=-1)
+        output_logits = model(encoder_input, decoder_input, genre_id, difficulty_tensor)
+        next_token_logits = output_logits[:, -1, :]
 
-            # Sample from the distribution
-            next_token_id = torch.multinomial(probabilities, 1).item()
+        if temperature != 1.0:
+            next_token_logits = next_token_logits / temperature
 
+        probabilities = torch.nn.functional.softmax(next_token_logits, dim=-1)
+        next_token_id = torch.multinomial(probabilities, 1).item()
 
-            generated_tokens.append(next_token_id)
+        generated_tokens.append(next_token_id)
+        next_token_tensor = torch.tensor([[next_token_id]], dtype=torch.long).to(device)
+        decoder_input = torch.cat([decoder_input, next_token_tensor], dim=1)
 
-            # Append the new token to the decoder input for the next step
-            next_token_tensor = torch.tensor([[next_token_id]], dtype=torch.long).to(device)
-            decoder_input = torch.cat([decoder_input, next_token_tensor], dim=1)
+        # Report progress every 10 steps
+        if progress_callback and step % 10 == 0:
+            progress = int(5 + (step / max_len) * 85)  # 5-90%
+            progress_callback(progress, f"Generated {step}/{max_len} tokens")
+
+    if progress_callback:
+        progress_callback(95, "Finalizing chart data")
 
     return generated_tokens
 

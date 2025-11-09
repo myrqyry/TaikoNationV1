@@ -6,8 +6,8 @@ import json
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import KFold
 
-from tokenization import TaikoTokenizer
-from audio_processing import get_audio_features, augment_spectrogram
+from .tokenization import TaikoTokenizer
+from .audio_processing import get_audio_features, augment_spectrogram
 
 # --- Constants ---
 INPUT_CHART_DIR = "input_charts_nr"

@@ -605,5 +605,94 @@
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <script src="static/js/app.js" defer></script>
+    <div id="training-metrics-dashboard" style="display: none;">
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <h3>Training Loss</h3>
+                <canvas id="loss-chart"></canvas>
+            </div>
+            <div class="metric-card">
+                <h3>Validation Accuracy</h3>
+                <canvas id="accuracy-chart"></canvas>
+            </div>
+            <div class="metric-card">
+                <h3>Learning Rate</h3>
+                <canvas id="lr-chart"></canvas>
+            </div>
+            <div class="metric-card">
+                <h3>GPU Memory Usage</h3>
+                <canvas id="memory-chart"></canvas>
+            </div>
+        </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script>
+        // Initialize charts
+        const chartConfig = {
+            type: 'line',
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: { duration: 300 },
+                interaction: { intersect: false, mode: 'index' },
+                plugins: {
+                    legend: { display: true, position: 'top' }
+                },
+                scales: {
+                    x: { display: true, title: { display: true, text: 'Epoch' } },
+                    y: { display: true, beginAtZero: false }
+                }
+            }
+        };
+
+        const lossChart = new Chart(
+            document.getElementById('loss-chart'),
+            {
+                ...chartConfig,
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Training Loss',
+                        data: [],
+                        borderColor: 'rgb(255, 99, 132)',
+                        backgroundColor: 'rgba(255, 99, 132, 0.1)',
+                    }]
+                }
+            }
+        );
+
+        const accuracyChart = new Chart(
+            document.getElementById('accuracy-chart'),
+            {
+                ...chartConfig,
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Validation Accuracy',
+                        data: [],
+                        borderColor: 'rgb(75, 192, 192)',
+                        backgroundColor: 'rgba(75, 192, 192, 0.1)',
+                    }]
+                }
+            }
+        );
+
+        // Socket handler for training metrics
+        socket.on('training_metrics', function(data) {
+            document.getElementById('training-metrics-dashboard').style.display = 'block';
+
+            // Update loss chart
+            lossChart.data.labels.push(data.epoch);
+            lossChart.data.datasets[0].data.push(data.loss);
+            lossChart.update();
+
+            // Update accuracy chart
+            if (data.accuracy !== undefined) {
+                accuracyChart.data.labels.push(data.epoch);
+                accuracyChart.data.datasets[0].data.push(data.accuracy);
+                accuracyChart.update();
+            }
+        });
+    </script>
 </body>
 </html>
