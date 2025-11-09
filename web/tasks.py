@@ -123,7 +123,7 @@ def process_audio_with_progress(task_id: str, audio_path: str, config: Dict):
             'audio_filename': os.path.basename(audio_path),
             'npy_filename': os.path.basename(npy_path),
             'feature_shape': features.shape,
-            'duration_seconds': features.shape[0] * 0.0232  # 23.2ms per frame
+            'duration_seconds': features.shape[0] * (config['data']['source_resolution_ms'] / 1000.0)  # ms to seconds
         }
 
         return result
