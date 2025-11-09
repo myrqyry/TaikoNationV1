@@ -5,6 +5,8 @@ import re
 import json
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import KFold
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing as mp
 
 from .tokenization import TaikoTokenizer
 from .audio_processing import get_audio_features, augment_spectrogram
@@ -15,7 +17,7 @@ INPUT_SONG_DIR = "input_songs"
 DIFFICULTY_MAP = {"easy": 0, "normal": 1, "hard": 2, "oni": 3, "ura": 4, "unknown": 1}
 
 class TaikoTransformerDataset(Dataset):
-    def __init__(self, all_samples, indices, tokenizer, genre_vocab, is_train=True, max_sequence_length=512, time_quantization_ms=100, source_resolution_ms=23.2, cache_dir='./cache'):
+    def __init__(self, all_samples, indices, tokenizer, genre_vocab, is_train=True, max_sequence_length=512, time_quantization_ms=100, source_resolution_ms=23.2, cache_dir='./cache', prefetch=True):
         self.is_train = is_train
         self.max_sequence_length = max_sequence_length
         self.tokenizer = tokenizer
@@ -24,31 +26,64 @@ class TaikoTransformerDataset(Dataset):
         self.source_resolution_ms = source_resolution_ms
         self.time_quantization_ms = time_quantization_ms
         self.cache_dir = cache_dir
+        self.prefetch = prefetch
         os.makedirs(cache_dir, exist_ok=True)
-        self._preprocess_audio()
+        self._preprocess_audio_async()
 
-    def _preprocess_audio(self):
-        """Pre-compute spectrograms offline before training"""
-        for i, sample in enumerate(self.samples):
-            cache_path = f"{self.cache_dir}/spec_{i}.npy"
+    def _preprocess_audio_async(self):
+        """Asynchronously pre-compute spectrograms with progress bar"""
+        print(f"Preprocessing audio features for {len(self.samples)} samples...")
+
+        def process_sample(idx, sample):
+            cache_path = os.path.join(self.cache_dir, f"spec_{idx}.npy")
             if not os.path.exists(cache_path):
-                audio_features = get_audio_features(sample["song_path"], source_resolution_ms=self.source_resolution_ms, frame_duration_ms=self.time_quantization_ms)
+                audio_features = get_audio_features(
+                    sample["song_path"],
+                    source_resolution_ms=self.source_resolution_ms,
+                    frame_duration_ms=self.time_quantization_ms
+                )
                 if audio_features is not None:
-                    np.save(cache_path, audio_features)
+                    temp_path = cache_path + '.tmp'
+                    np.save(temp_path, audio_features)
+                    os.replace(temp_path, cache_path)
+                    return True
+            return False
+
+        num_workers = min(mp.cpu_count(), 8)
+        processed_count = 0
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {
+                executor.submit(process_sample, idx, sample): idx
+                for idx, sample in enumerate(self.samples)
+            }
+            from tqdm import tqdm
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Preprocessing"):
+                if future.result():
+                    processed_count += 1
+
+        print(f"Processed {processed_count} new audio files, {len(self.samples) - processed_count} from cache")
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        sample = self.samples[idx]
-        cache_path = f"{self.cache_dir}/spec_{idx}.npy"
-        if not os.path.exists(cache_path):
-            return None
-        try:
-            audio_features = np.load(cache_path)
-        except (IOError, ValueError) as e:
-            print(f"Warning: Could not load audio cache file {cache_path}: {e}")
-            return None
+        if self.prefetch and not hasattr(self, '_cache'):
+            self._cache = {}
+
+        cache_path = os.path.join(self.cache_dir, f"spec_{idx}.npy")
+
+        if self.prefetch and idx in self._cache:
+            audio_features = self._cache[idx]
+        else:
+            if not os.path.exists(cache_path):
+                return None
+            try:
+                audio_features = np.load(cache_path)
+                if self.prefetch:
+                    self._cache[idx] = audio_features
+            except Exception as e:
+                print(f"Warning: Could not load {cache_path}: {e}")
+                return None
 
         if audio_features.ndim != 2 or audio_features.shape[0] == 0:
             print(f"Warning: Corrupt audio features in {cache_path}, shape is {audio_features.shape}")
@@ -156,7 +191,29 @@ def get_transformer_data_loaders(config, fold_idx=0):
     train_dataset = TaikoTransformerDataset(all_samples, train_indices, tokenizer, genre_vocab, is_train=True, max_sequence_length=data_config['max_sequence_length'], time_quantization_ms=data_config['time_quantization_ms'], source_resolution_ms=data_config['source_resolution_ms'])
     val_dataset = TaikoTransformerDataset(all_samples, val_indices, tokenizer, genre_vocab, is_train=False, max_sequence_length=data_config['max_sequence_length'], time_quantization_ms=data_config['time_quantization_ms'], source_resolution_ms=data_config['source_resolution_ms'])
 
-    train_loader = DataLoader(train_dataset, batch_size=config['training']['batch_size'], shuffle=True, num_workers=2, collate_fn=collate_fn)
-    val_loader = DataLoader(val_dataset, batch_size=config['training']['batch_size'], shuffle=False, num_workers=2, collate_fn=collate_fn)
+    num_workers = min(mp.cpu_count(), config['training'].get('num_workers', 4))
+    prefetch_factor = config['training'].get('prefetch_factor', 2)
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config['training']['batch_size'],
+        shuffle=True,
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+        pin_memory=True,
+        prefetch_factor=prefetch_factor,
+        persistent_workers=True
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config['training']['batch_size'],
+        shuffle=False,
+        num_workers=num_workers // 2,
+        collate_fn=collate_fn,
+        pin_memory=True,
+        prefetch_factor=prefetch_factor,
+        persistent_workers=True
+    )
 
     return train_loader, val_loader, tokenizer, genre_vocab

@@ -19,13 +19,29 @@ data:
   source_resolution_ms: 23.2 # The resolution of the input spectrogram features
 
 training:
-  batch_size: 16
+  batch_size: 8
+  effective_batch_size: 32
   learning_rate: 0.0001
-  num_epochs: 50
-  k_folds: 5 # For cross-validation
-  use_wandb: true # Toggle for Weights & Biases logging
-  early_stopping_patience: 5
-  lr_scheduler_patience: 2
+  num_epochs: 100
+  k_folds: 5
+  use_wandb: true
+
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  scheduler_type: 'cosine_warmup'
+  restart_period: 10
+
+  early_stopping_patience: 10
+  early_stopping_delta: 0.0001
+
+  num_workers: 4
+  prefetch_factor: 2
+
+  save_path: './output/taiko_transformer.pth'
+  keep_best_n: 3
+  keep_last_n: 2
+  save_every_n_epochs: 5
+  cleanup_checkpoints: false
 
 generate:
   # Parameters for chart generation

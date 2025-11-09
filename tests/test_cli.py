@@ -1,12 +1,14 @@
 import os
 import subprocess
 import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import unittest
 import numpy as np
 import torch
-from transformer_model import TaikoTransformer
-from tokenization import TaikoTokenizer
-from transformer_dataset import DIFFICULTY_MAP
+from taikonation.models.transformer_model import TaikoTransformer
+from taikonation.data.tokenization import TaikoTokenizer
+from taikonation.data.dataset import DIFFICULTY_MAP
 
 class TestCli(unittest.TestCase):
     def setUp(self):
