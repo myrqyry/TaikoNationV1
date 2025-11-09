@@ -37,7 +37,48 @@ from werkzeug.utils import secure_filename
 from werkzeug.security import safe_join
 from enum import Enum
 
-from web.helpers import error_response
+from .helpers import error_response
+from functools import wraps
+
+class APIError(Exception):
+    """Custom API exception with user-friendly messages"""
+    def __init__(self, message, code, status_code=400, details=None):
+        self.message = message
+        self.code = code
+        self.status_code = status_code
+        self.details = details
+        super().__init__(self.message)
+
+def handle_api_errors(f):
+    """Centralized error handler decorator"""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        try:
+            return f(*args, **kwargs)
+        except APIError as e:
+            logger.warning(f"API Error in {f.__name__}: {e.message}")
+            return jsonify({
+                'success': False,
+                'error': e.message,
+                'code': e.code,
+                'details': e.details
+            }), e.status_code
+        except ValidationError as e:
+            logger.warning(f"Validation Error in {f.__name__}: {e.messages}")
+            return jsonify({
+                'success': False,
+                'error': 'Invalid input parameters',
+                'code': 'VALIDATION_ERROR',
+                'details': e.messages
+            }), 400
+        except Exception as e:
+            logger.error(f"Unexpected error in {f.__name__}: {e}", exc_info=True)
+            return jsonify({
+                'success': False,
+                'error': 'An unexpected error occurred. Please try again.',
+                'code': 'INTERNAL_ERROR'
+            }), 500
+    return decorated
 
 class Difficulty(Enum):
     EASY = 0
@@ -64,13 +105,10 @@ def validate_difficulty(f):
 
 # Import existing TaikoNation modules
 try:
-    # Add the parent directory to path to import TaikoNation modules
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-    from audio_processing import get_audio_features, augment_spectrogram
-    from transformer_model import TaikoTransformer
-    from transformer_dataset import get_transformer_data_loaders, DIFFICULTY_MAP
-    from tokenization import TaikoTokenizer
+    from taikonation.data.audio_processing import get_audio_features, augment_spectrogram
+    from taikonation.models.transformer import TaikoTransformer
+    from taikonation.data.dataset import get_transformer_data_loaders, DIFFICULTY_MAP
+    from taikonation.data.tokenization import TaikoTokenizer
     from config_schema import ConfigSchema
     # Do NOT import train_transformer at module import time: it may import heavy deps (wandb)
     # which can pull eventlet and trigger ssl-related import-time errors in some environments.
@@ -163,19 +201,79 @@ def add_security_headers(response):
     return response
 
 
+from marshmallow import Schema, fields, validates, validates_schema, ValidationError
+
 # Marshmallow Schemas for Input Validation
 class ChartGenerationSchema(Schema):
-    title = fields.Str(load_default="Untitled", validate=lambda x: len(x) <= 200)
-    artist = fields.Str(load_default="Unknown", validate=lambda x: len(x) <= 200)
-    bpm = fields.Int(load_default=120, validate=lambda x: 60 <= x <= 300)
-    genre = fields.Str(load_default="electronic")
+    title = fields.Str(
+        load_default="Untitled",
+        validate=lambda x: len(x) <= 200 and len(x.strip()) > 0,
+        error_messages={'validator_failed': 'Title must be 1-200 characters'}
+    )
+    artist = fields.Str(
+        load_default="Unknown",
+        validate=lambda x: len(x) <= 200 and len(x.strip()) > 0,
+        error_messages={'validator_failed': 'Artist must be 1-200 characters'}
+    )
+    bpm = fields.Int(
+        load_default=120,
+        validate=lambda x: 60 <= x <= 300,
+        error_messages={'validator_failed': 'BPM must be between 60 and 300'}
+    )
+    genre = fields.Str(
+        load_default="electronic",
+        validate=lambda x: x in ['electronic', 'rock', 'pop', 'classical', 'jazz', 'other'],
+        error_messages={'validator_failed': 'Invalid genre selection'}
+    )
     difficulty = fields.Str(
         load_default="oni",
         validate=lambda x: x in ["kantan", "futsuu", "muzukashii", "oni", "ura"],
+        error_messages={'validator_failed': 'Invalid difficulty level'}
     )
-    pattern_style = fields.Str(load_default="balanced")
+    pattern_style = fields.Str(
+        load_default="balanced",
+        validate=lambda x: x in ['balanced', 'technical', 'stream', 'mixed'],
+        error_messages={'validator_failed': 'Invalid pattern style'}
+    )
     audio_filename = fields.Str(required=True)
     npy_filename = fields.Str(required=False, load_default=None)
+
+    @validates('audio_filename')
+    def validate_audio_file(self, value):
+        """Check if audio file exists"""
+        audio_path = os.path.join(UPLOAD_FOLDER, secure_filename(value))
+        if not os.path.exists(audio_path):
+            raise ValidationError(f'Audio file not found: {value}')
+
+    @validates_schema
+    def validate_feature_file(self, data, **kwargs):
+        """Check if feature file exists or can be generated"""
+        npy_filename = data.get('npy_filename')
+        audio_filename = data.get('audio_filename')
+
+        if npy_filename:
+            npy_path = os.path.join(UPLOAD_FOLDER, secure_filename(npy_filename))
+            if not os.path.exists(npy_path):
+                raise ValidationError(
+                    {'npy_filename': f'Feature file not found: {npy_filename}'}
+                )
+        elif audio_filename:
+            # Check if we can generate features from audio
+            expected_npy = os.path.splitext(secure_filename(audio_filename))[0] + '.npy'
+            npy_path = os.path.join(UPLOAD_FOLDER, expected_npy)
+            if not os.path.exists(npy_path):
+                raise ValidationError(
+                    {'npy_filename': 'Audio features not yet processed. Please wait for processing to complete.'}
+                )
+
+    @validates_schema
+    def validate_model_exists(self, data, **kwargs):
+        """Check if trained model exists"""
+        model_path = os.path.join(MODEL_FOLDER, 'taiko_transformer.pth')
+        if not os.path.exists(model_path):
+            raise ValidationError(
+                {'_schema': 'No trained model found. Please train a model first.'}
+            )
 
 
 class TrainingSchema(Schema):
@@ -718,39 +816,34 @@ def validate_audio_file(file):
 
 @app.route('/api/upload-audio', methods=['POST'])
 @require_api_token
+@handle_api_errors
 def api_upload_audio():
     """Handle audio file upload and processing."""
     if 'audio' not in request.files:
-        return jsonify(error_response('No audio file provided', code='MISSING_FILE')), 400
+        raise APIError('No audio file provided', code='MISSING_FILE')
 
     file = request.files['audio']
     if file.filename == '':
-        return jsonify(error_response('No file selected', code='MISSING_FILENAME')), 400
+        raise APIError('No file selected', code='MISSING_FILENAME')
 
     if file:
-        try:
-            filename = validate_audio_file(file)
+        filename = validate_audio_file(file)
 
-            # Save to isolated directory with random name
-            safe_path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4()}_{filename}")
-            file.save(safe_path)
+        # Save to isolated directory with random name
+        safe_path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4()}_{filename}")
+        file.save(safe_path)
 
-            from web.tasks import create_task
-            # Create a task for audio processing
-            task_id = create_task('process_uploaded_audio', safe_path, server.config)
+        from web.tasks import create_task
+        # Create a task for audio processing
+        task_id = create_task('process_uploaded_audio', safe_path, server.config)
 
-            server.submit_task(task_id)
+        server.submit_task(task_id)
 
-            return jsonify({
-                'success': True,
-                'task_id': task_id,
-                'message': 'Audio processing started.'
-            }), 202
-
-        except (ValueError, Exception) as e:
-            logger.error(f"Audio upload error: {e}")
-            server.add_system_log('error', f'Audio upload failed: {str(e)}')
-            return jsonify(error_response(str(e), code='UPLOAD_FAILED')), 500
+        return jsonify({
+            'success': True,
+            'task_id': task_id,
+            'message': 'Audio processing started.'
+        }), 202
 
 @app.route('/api/tasks/<task_id>', methods=['GET'])
 def api_get_task(task_id):
@@ -830,39 +923,31 @@ def with_timeout(seconds):
 @app.route('/api/generate-chart', methods=['POST'])
 @require_api_token
 @validate_difficulty
+@handle_api_errors
 def api_generate_chart(difficulty=Difficulty.ONI):
     """Generate a chart from uploaded audio."""
     app.logger.info(f"Chart generation request: {request.json}")
-    try:
-        # Support both JSON and form data
-        if request.is_json:
-            request_data = request.get_json() or {}
-        else:
-            request_data = request.form.to_dict()
+    # Support both JSON and form data
+    if request.is_json:
+        request_data = request.get_json() or {}
+    else:
+        request_data = request.form.to_dict()
 
-        # Validate generation parameters
-        schema = ChartGenerationSchema()
-        params = schema.load(request_data)
+    # Validate generation parameters
+    schema = ChartGenerationSchema()
+    params = schema.load(request_data)
 
-        from web.tasks import create_task
-        # Create a task for chart generation
-        task_id = create_task('start_chart_generation', params)
+    from web.tasks import create_task
+    # Create a task for chart generation
+    task_id = create_task('start_chart_generation', params)
 
-        server.submit_task(task_id)
+    server.submit_task(task_id)
 
-        return jsonify({
-            'success': True,
-            'task_id': task_id,
-            'message': 'Chart generation started.'
-        }), 202
-
-    except ValidationError as err:
-        logger.warning(f"Invalid chart generation parameters: {err.messages}")
-        return jsonify(error_response('Invalid parameters', code='VALIDATION_ERROR', details=err.messages)), 400
-    except Exception as e:
-        logger.error(f"Chart generation error: {e}", exc_info=True)
-        server.add_system_log('error', f'Chart generation failed: {str(e)}')
-        return jsonify(error_response(str(e), code='GENERATION_FAILED')), 500
+    return jsonify({
+        'success': True,
+        'task_id': task_id,
+        'message': 'Chart generation started.'
+    }), 202
 
 @app.route('/api/charts')
 def api_charts():
@@ -1150,56 +1235,47 @@ def sanitize_subprocess_arg(arg, max_length=100):
     sanitized = sanitized[:max_length]  # Limit length
     return sanitized
 
+from taikonation.generation.generator import generate_chart, load_model, save_osu_chart
+
 def start_chart_generation(params: Dict[str, Any]):
-    """Start chart generation process."""
+    """Start chart generation with real-time progress"""
     try:
-        socketio.emit('generation_progress', {'progress': 10})
+        def emit_progress(percent, message):
+            socketio.emit('generation_progress', {
+                'progress': percent,
+                'message': message,
+                'chart_title': params['title']
+            })
 
+        emit_progress(5, "Loading model...")
         model_path = os.path.join(MODEL_FOLDER, 'taiko_transformer.pth')
-        if not os.path.exists(model_path):
-            logger.warning(f"Model file not found at {model_path}. Using random weights.")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = load_model(model_path, server.config, device)
 
-        # Use the npy_filename returned from upload, or fall back to convention
+        emit_progress(10, "Loading audio features...")
         npy_filename = params.get('npy_filename')
         if npy_filename:
             npy_path = os.path.join(UPLOAD_FOLDER, npy_filename)
         else:
-            # Fallback: derive from audio_filename
             audio_filename = secure_filename(params.get('audio_filename', f"{params['title']}.mp3"))
             npy_path = os.path.join(UPLOAD_FOLDER, os.path.splitext(audio_filename)[0] + '.npy')
 
         if not os.path.exists(npy_path):
             raise FileNotFoundError(f"Feature file not found: {npy_path}")
+        audio_features = np.load(npy_path)
 
+        emit_progress(15, "Starting chart generation...")
+        difficulty_id = DIFFICULTY_MAP.get(params['difficulty'].lower(), 3)  # Default to Oni
+        generated_token_ids = generate_chart(
+            model, audio_features, server.tokenizer,
+            difficulty_id, server.config, device,
+            progress_callback=emit_progress
+        )
+
+        emit_progress(95, "Saving chart file...")
         output_filename = f"{secure_filename(params['title'])}_{uuid.uuid4().hex[:8]}.osu"
         output_path = os.path.join(CHART_OUTPUT_FOLDER, output_filename)
-
-        command = [
-            sys.executable,
-            os.path.join(BASE_DIR, 'generate_chart.py'),
-            model_path,
-            npy_path,
-            output_path,
-            '--difficulty', sanitize_subprocess_arg(params['difficulty']),
-            '--title', sanitize_subprocess_arg(params['title']),
-            '--artist', sanitize_subprocess_arg(params['artist']),
-            '--seed', '42',
-        ]
-
-        logger.info(f"Running command: {command}")
-        try:
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=True
-            )
-        except subprocess.CalledProcessError as e:
-            error_msg = f"Chart generation script failed: {e.stderr}"
-            raise Exception(error_msg)
-
-        socketio.emit('generation_progress', {'progress': 90})
+        save_osu_chart(generated_token_ids, server.tokenizer, output_path, params['audio_filename'], title=params['title'], artist=params['artist'])
 
         chart = {
             'id': len(_server_state.get_charts()) + 1,
@@ -1216,14 +1292,13 @@ def start_chart_generation(params: Dict[str, Any]):
 
         _server_state.add_chart(chart)
         _server_state.evaluation_queue.append(chart)
-
-        socketio.emit('generation_progress', {'progress': 100})
+        emit_progress(100, "Chart generation complete!")
         socketio.emit('chart_generated', {'chart': chart})
 
         return chart
 
     except Exception as e:
-        logger.error(f"Chart generation task failed: {e}")
+        logger.error(f"Chart generation task failed: {e}", exc_info=True)
         # Re-raise the exception to be caught by the task runner
         raise
 
@@ -1256,6 +1331,17 @@ def update_config_from_form(form_data):
 def calculate_average_rating() -> float:
     """Calculate average rating across all charts."""
     charts = _server_state.get_charts()
+
+def emit_training_metrics(epoch, metrics):
+    """Emit training metrics to connected clients"""
+    socketio.emit('training_metrics', {
+        'epoch': epoch,
+        'loss': metrics.get('loss', 0),
+        'accuracy': metrics.get('accuracy', 0),
+        'learning_rate': metrics.get('lr', 0),
+        'gpu_memory_mb': metrics.get('gpu_memory_mb', 0),
+        'timestamp': datetime.now().isoformat()
+    })
     if not charts:
         return 0.0
 

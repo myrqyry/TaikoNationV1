@@ -9,7 +9,7 @@ import scipy.io.wavfile as wavfile
 
 # Add the web directory to the path to import the server
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'web'))
-from server import app
+from web.server import app
 
 class TestWebAPI(unittest.TestCase):
     def setUp(self):
