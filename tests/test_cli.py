@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import unittest
 import numpy as np
 import torch
-from taikonation.models.transformer_model import TaikoTransformer
+from taikonation.models.transformer import TaikoTransformer
 from taikonation.data.tokenization import TaikoTokenizer
 from taikonation.data.dataset import DIFFICULTY_MAP
 
@@ -50,7 +50,7 @@ class TestCli(unittest.TestCase):
         """Test that generate_chart.py produces a non-empty .osu file."""
         command = [
             sys.executable,
-            "generate_chart.py",
+            "taikonation/generation/generator.py",
             self.model_path,
             self.sample_npy_path,
             self.output_osu_path,

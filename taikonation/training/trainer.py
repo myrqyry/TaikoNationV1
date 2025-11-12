@@ -8,8 +8,10 @@ import argparse
 import json
 
 from taikonation.data.dataset import get_transformer_data_loaders, DIFFICULTY_MAP
-from taikonation.models.transformer_model import TaikoTransformer
+from taikonation.experiments.experiment_tracker import ExperimentTracker
+from taikonation.models.transformer import TaikoTransformer
 from taikonation.data.tokenization import TaikoTokenizer
+from taikonation.utils.seed import set_seed
 from datetime import datetime
 from torch.optim.lr_scheduler import LambdaLR
 import math
@@ -280,7 +282,11 @@ def train_fold(config, fold_idx):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"--- Starting Fold {fold_idx + 1} on {device} ---")
 
-    train_loader, val_loader, tokenizer, genre_vocab = get_transformer_data_loaders(config, fold_idx)
+    # Set seed for reproducibility
+    set_seed(config['training'].get('seed', 42) + fold_idx)
+
+    with ExperimentTracker(f"train_fold_{fold_idx}", config) as tracker:
+        train_loader, val_loader, tokenizer, genre_vocab = get_transformer_data_loaders(config, fold_idx)
     if not train_loader:
         wandb.finish()
         return
@@ -419,12 +425,16 @@ def train_fold(config, fold_idx):
         if early_stopping(epoch, val_results['loss']):
             print(f"\nEarly stopping triggered at epoch {epoch+1}")
             print(f"Best epoch was {early_stopping.best_epoch+1} with val_loss={-early_stopping.best_score:.4f}")
+            tracker.log_metric("best_epoch", early_stopping.best_epoch + 1)
+            tracker.log_metric("best_val_loss", -early_stopping.best_score)
             break
 
     if config['training'].get('cleanup_checkpoints', False):
         checkpoint_manager.cleanup_all_except_best()
 
     print("--- Finished Supervised Training ---")
+    tracker.log_metrics({"final_train_results": train_results, "final_val_results": val_results})
+
 
     genre_vocab_path = os.path.join(os.path.dirname(config['training']['save_path']), "genre_vocab.json")
     with open(genre_vocab_path, 'w') as f:
