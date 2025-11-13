@@ -1,0 +1,15 @@
+{
+    "pattern_metrics": {
+        "n_gram_uniqueness": 1.0,
+        "pattern_entropy": 8.991521846075694
+    },
+    "timing_metrics": {
+        "token_note_ratio": 0.9863013698630136
+    },
+    "difficulty_metrics": {
+        "estimated_difficulty": 25.914550541466454
+    },
+    "human_likeness_metrics": {
+        "some_future_metric": 0.0
+    }
+}

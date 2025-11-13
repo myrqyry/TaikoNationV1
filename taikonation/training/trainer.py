@@ -12,6 +12,7 @@ from taikonation.experiments.experiment_tracker import ExperimentTracker
 from taikonation.models.transformer import TaikoTransformer
 from taikonation.data.tokenization import TaikoTokenizer
 from taikonation.utils.seed import set_seed
+from taikonation.eval.metrics import AcademicEvaluator
 from datetime import datetime
 from torch.optim.lr_scheduler import LambdaLR
 import math
@@ -123,11 +124,16 @@ class MetricsTracker:
         """Update metrics with batch results"""
         self.losses.append(loss.item())
         pred_tokens = predictions.argmax(dim=-1)
-        mask = targets != self.tokenizer.vocab["[PAD]"]
-        self.predictions.extend(pred_tokens[mask].cpu().numpy())
-        self.targets.extend(targets[mask].cpu().numpy())
 
-        for pred, tgt in zip(pred_tokens[mask].cpu().numpy(), targets[mask].cpu().numpy()):
+        for i in range(targets.shape[0]):
+            mask = targets[i] != self.tokenizer.vocab["[PAD]"]
+            chart_predictions = pred_tokens[i][mask].cpu().numpy()
+            chart_targets = targets[i][mask].cpu().numpy()
+
+            self.predictions.append(chart_predictions)
+            self.targets.append(chart_targets)
+
+            for pred, tgt in zip(chart_predictions, chart_targets):
             note_type = self.tokenizer.id_to_token.get(tgt, "[UNK]")
             self.note_type_total[note_type] += 1
             if pred == tgt:
@@ -138,8 +144,13 @@ class MetricsTracker:
         metrics = {}
         metrics['loss'] = np.mean(self.losses) if self.losses else 0.0
         metrics['perplexity'] = np.exp(metrics['loss'])
-        if len(self.predictions) > 0:
-            metrics['accuracy'] = np.mean(np.array(self.predictions) == np.array(self.targets))
+
+        # Flatten the lists for accuracy calculation
+        flat_predictions = [item for sublist in self.predictions for item in sublist]
+        flat_targets = [item for sublist in self.targets for item in sublist]
+
+        if len(flat_predictions) > 0:
+            metrics['accuracy'] = np.mean(np.array(flat_predictions) == np.array(flat_targets))
         else:
             metrics['accuracy'] = 0.0
 
@@ -155,20 +166,23 @@ class MetricsTracker:
     def _compute_f1_scores(self):
         """Compute F1 score for each token type"""
         from sklearn.metrics import f1_score
-        if len(self.predictions) == 0:
+        flat_predictions = [item for sublist in self.predictions for item in sublist]
+        flat_targets = [item for sublist in self.targets for item in sublist]
+
+        if len(flat_predictions) == 0:
             return {}
 
-        unique_labels = sorted(set(self.targets))
+        unique_labels = sorted(set(flat_targets))
         f1_macro = f1_score(
-            self.targets,
-            self.predictions,
+            flat_targets,
+            flat_predictions,
             labels=unique_labels,
             average='macro',
             zero_division=0
         )
         f1_per_class = f1_score(
-            self.targets,
-            self.predictions,
+            flat_targets,
+            flat_predictions,
             labels=unique_labels,
             average=None,
             zero_division=0
@@ -321,6 +335,8 @@ def train_fold(config, fold_idx):
         verbose=True
     )
 
+    academic_evaluator = AcademicEvaluator(tokenizer)
+
     desired_batch_size = config['training'].get('effective_batch_size', 32)
     actual_batch_size = config['training']['batch_size']
     accumulation_steps = max(1, desired_batch_size // actual_batch_size)
@@ -381,6 +397,18 @@ def train_fold(config, fold_idx):
         train_results = train_metrics.compute()
         val_results = val_metrics.compute()
 
+        # Calculate academic metrics on a per-chart basis and aggregate
+        all_academic_metrics = [academic_evaluator.evaluate_chart(p) for p in val_metrics.predictions]
+
+        # Aggregate the metrics
+        aggregated_metrics = defaultdict(list)
+        for chart_metrics in all_academic_metrics:
+            for cat, sub_dict in chart_metrics.items():
+                for key, val in sub_dict.items():
+                    aggregated_metrics[f"{cat}_{key}"].append(val)
+
+        mean_academic_metrics = {f"val/academic/{key}": np.mean(vals) for key, vals in aggregated_metrics.items()}
+
         if config['training'].get('scheduler_type') not in ['cosine_warmup']:
             scheduler.step(val_results['loss'])
 
@@ -393,7 +421,8 @@ def train_fold(config, fold_idx):
             'val/accuracy': val_results['accuracy'],
             'val/perplexity': val_results['perplexity'],
             'val/f1_macro': val_results['f1_scores']['macro'],
-            'learning_rate': optimizer.param_groups[0]['lr']
+            'learning_rate': optimizer.param_groups[0]['lr'],
+            **mean_academic_metrics
         })
 
         for note_type, acc in val_results['note_accuracies'].items():
@@ -433,7 +462,12 @@ def train_fold(config, fold_idx):
         checkpoint_manager.cleanup_all_except_best()
 
     print("--- Finished Supervised Training ---")
-    tracker.log_metrics({"final_train_results": train_results, "final_val_results": val_results})
+    final_academic_metrics_summary = {key.replace('val/academic/', ''): val for key, val in mean_academic_metrics.items()}
+    tracker.log_metrics({
+        "final_train_results": train_results,
+        "final_val_results": val_results,
+        "final_academic_metrics": final_academic_metrics_summary
+    })
 
 
     genre_vocab_path = os.path.join(os.path.dirname(config['training']['save_path']), "genre_vocab.json")

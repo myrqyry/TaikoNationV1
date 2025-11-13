@@ -4,9 +4,11 @@ import os
 import torch
 import yaml
 import numpy as np
+import json
 
 from taikonation.models.transformer import TaikoTransformer
 from taikonation.data.tokenization import TaikoTokenizer
+from taikonation.eval.metrics import AcademicEvaluator
 from taikonation.data.audio_processing import get_audio_features
 from taikonation.data.dataset import DIFFICULTY_MAP
 from web.helpers import atomic_write
@@ -259,6 +261,18 @@ def main():
     generated_token_ids = generate_chart(model, audio_features, tokenizer, difficulty_id, config, device, temperature=args.temperature)
     save_osu_chart(generated_token_ids, tokenizer, args.output_path, args.audio_path,
                    title=args.title, artist=args.artist, source=args.source, tags=args.tags)
+
+    # --- Evaluate and Save Metrics ---
+    evaluator = AcademicEvaluator(tokenizer)
+    metrics = evaluator.evaluate_chart(generated_token_ids)
+
+    metrics_output_path = os.path.splitext(args.output_path)[0] + "_metrics.json"
+    try:
+        with atomic_write(metrics_output_path, "w") as f:
+            json.dump(metrics, f, indent=4)
+        print(f"Academic metrics saved to {metrics_output_path}")
+    except IOError as e:
+        print(f"Error saving metrics file: {e}")
 
 
 if __name__ == "__main__":
