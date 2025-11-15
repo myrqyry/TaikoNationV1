@@ -19,93 +19,6 @@ from collections import defaultdict
 import numpy as np
 import shutil
 from pathlib import Path
-import torch.nn.functional as F
-
-
-class PatternAwareLoss(nn.Module):
-    """
-    Combined loss function emphasizing pattern coherence
-    Based on TaikoNation's sliding window approach
-    """
-    def __init__(self, pattern_window=8, pattern_weight=0.3):
-        super().__init__()
-        self.pattern_window = pattern_window
-        self.pattern_weight = pattern_weight
-        self.ce_loss = nn.CrossEntropyLoss()
-
-    def forward(self, logits, targets):
-        """
-        Args:
-            logits: (batch, seq_len, vocab_size)
-            targets: (batch, seq_len)
-        """
-        # Standard cross-entropy loss
-        batch_size, seq_len, vocab_size = logits.shape
-        ce_loss = self.ce_loss(
-            logits.reshape(-1, vocab_size),
-            targets.reshape(-1)
-        )
-
-        # Pattern coherence loss (sliding window)
-        pattern_loss = self.compute_pattern_loss(logits)
-
-        # Combined loss
-        total_loss = ce_loss + self.pattern_weight * pattern_loss
-
-        return total_loss, {
-            'ce_loss': ce_loss.item(),
-            'pattern_loss': pattern_loss.item(),
-            'total_loss': total_loss.item()
-        }
-
-    def compute_pattern_loss(self, logits):
-        """
-        Penalize inconsistent pattern usage
-        Encourages reuse of learned patterns. (Vectorized)
-        """
-        batch_size, seq_len, vocab_size = logits.shape
-        device = logits.device
-
-        if seq_len < self.pattern_window * 2:
-            return torch.tensor(0.0, device=device)
-
-        # Extract predicted patterns (B, L)
-        preds = torch.argmax(logits, dim=-1).float()
-
-        # Create sliding windows (B, num_windows, window_size)
-        patterns = preds.unfold(dimension=1, size=self.pattern_window, step=1)
-        num_windows = patterns.shape[1]
-
-        # Expand for all-pairs comparison
-        p1 = patterns.unsqueeze(2)  # (B, num_windows, 1, window_size)
-        p2 = patterns.unsqueeze(1)  # (B, 1, num_windows, window_size)
-
-        # Calculate pairwise Hamming similarity (B, num_windows, num_windows)
-        similarity_matrix = (p1 == p2).float().mean(dim=3)
-
-        # Create a mask to select only non-overlapping forward pairs
-        # j must be at least i + pattern_window
-        indices = torch.arange(num_windows, device=device)
-        mask = indices.unsqueeze(0) >= indices.unsqueeze(1) + self.pattern_window
-
-        if not mask.any():
-            return torch.tensor(0.0, device=device)
-
-        # Apply mask and calculate mean similarity over all valid pairs in the batch
-        masked_similarities = similarity_matrix.masked_select(mask.unsqueeze(0))
-
-        if masked_similarities.nelement() == 0:
-            return torch.tensor(0.0, device=device)
-
-        mean_similarity = masked_similarities.mean()
-
-        # Target: ~20-30% of patterns should be similar
-        target_similarity = 0.25
-        loss = F.mse_loss(mean_similarity,
-                          torch.tensor(target_similarity, device=device))
-
-        return loss
-
 
 class CheckpointManager:
     """Manage model checkpoints with configurable retention policies"""
@@ -386,10 +299,7 @@ def train_fold(config, fold_idx):
     ).to(device)
     wandb.watch(model, log="all")
 
-    criterion = PatternAwareLoss(
-        pattern_window=config['training'].get('pattern_window', 8),
-        pattern_weight=config['training'].get('pattern_weight', 0.3)
-    )
+    criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.vocab["[PAD]"])
     total_steps = len(train_loader) * config['training']['num_epochs']
     optimizer, scheduler = create_optimizer_and_scheduler(model, config, total_steps)
     scaler = torch.cuda.amp.GradScaler()
@@ -431,7 +341,7 @@ def train_fold(config, fold_idx):
 
             with torch.cuda.amp.autocast():
                 output = model(encoder_input, decoder_input, genre_id, difficulty_id)
-                loss, loss_dict = criterion(output, target)
+                loss = criterion(output.view(-1, tokenizer.vocab_size), target.view(-1))
                 loss = loss / accumulation_steps
 
             scaler.scale(loss).backward()
@@ -465,7 +375,7 @@ def train_fold(config, fold_idx):
                 difficulty_id = batch["difficulty"].to(device)
 
                 output = model(encoder_input, decoder_input, genre_id, difficulty_id)
-                loss, loss_dict = criterion(output, target)
+                loss = criterion(output.view(-1, tokenizer.vocab_size), target.view(-1))
                 val_metrics.update(output, target, loss)
 
         train_results = train_metrics.compute()
@@ -476,10 +386,10 @@ def train_fold(config, fold_idx):
 
         wandb.log({
             'epoch': epoch,
-            'train/total_loss': train_results['loss'],
+            'train/loss': train_results['loss'],
             'train/accuracy': train_results['accuracy'],
             'train/perplexity': train_results['perplexity'],
-            'val/total_loss': val_results['loss'],
+            'val/loss': val_results['loss'],
             'val/accuracy': val_results['accuracy'],
             'val/perplexity': val_results['perplexity'],
             'val/f1_macro': val_results['f1_scores']['macro'],

@@ -343,10 +343,26 @@ class TaikoNationApp {
                 const result = await response.json();
                 this.addSystemLog('success', `Audio processed: ${file.name}`);
                 this.uploadedAudioFilename = result.filename;
+                this.currentAudioFile = file; // Store the file object
                 
                 // Auto-fill form fields if on generation page
                 if (this.currentPage === 'generation') {
                     this.updateGenerationForm(result);
+                }
+
+                // Check if MediaPipe analysis is enabled
+                if (document.getElementById('use-mediapipe').checked) {
+                    document.getElementById('audio-analysis-progress').style.display = 'block';
+
+                    // Run MediaPipe analysis
+                    const analysis = await analyzeUploadedAudio(file);
+
+                    console.log('MediaPipe analysis complete:', analysis);
+
+                    // Store for chart generation
+                    this.currentAudioAnalysis = analysis;
+
+                    document.getElementById('audio-analysis-progress').style.display = 'none';
                 }
             } else {
                 throw new Error(`Upload failed: ${response.statusText}`);
@@ -469,20 +485,23 @@ class TaikoNationApp {
 
     // Generation methods
     async generateChart() {
-        const form = document.getElementById('generationForm');
         if (!this.uploadedAudioFilename) {
             this.addSystemLog('error', 'Please upload an audio file first.');
             return;
         }
 
+        const form = document.getElementById('generationForm');
         const formData = new FormData(form);
         const data = Object.fromEntries(formData.entries());
         data.audio_filename = this.uploadedAudioFilename;
 
+        // Use the new endpoint if mediapipe analysis was done
+        const endpoint = this.currentAudioAnalysis ? `${this.apiBase}/generate_chart_with_audio_analysis` : `${this.apiBase}/generate-chart`;
+
         try {
             this.stateManager.setState('generation', { active: true, progress: 0 });
             
-            const response = await fetch(`${this.apiBase}/generate-chart`, {
+            const response = await fetch(endpoint, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -491,7 +510,11 @@ class TaikoNationApp {
             });
             
             if (response.ok) {
+                const result = await response.json();
                 this.addSystemLog('success', 'Chart generation started');
+                if (result.used_classification) {
+                    console.log('Chart generated with MediaPipe enhancement!');
+                }
             } else {
                 throw new Error(`Generation failed: ${response.statusText}`);
             }
@@ -887,12 +910,6 @@ function startTraining() {
 function stopTraining() {
     if (window.taikoApp) {
         window.taikoApp.stopTraining();
-    }
-}
-
-function generateChart() {
-    if (window.taikoApp) {
-        window.taikoApp.generateChart();
     }
 }
 
@@ -1603,4 +1620,132 @@ class TaikoNationUI {
 document.addEventListener('DOMContentLoaded', () => {
     window.taikoApp = new TaikoNationApp();
     window.taikoUI = new TaikoNationUI();
+    initializeMediaPipeAudio();
 });
+
+/**
+ * MediaPipe Audio Analysis for rhythm-tatsujin
+ * Enhances audio feature extraction for chart generation
+ */
+
+let audioClassifier = null;
+let audioClassificationResults = [];
+
+async function initializeMediaPipeAudio() {
+    const audio = await FilesetResolver.forAudioTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-audio/wasm"
+    );
+
+    audioClassifier = await AudioClassifier.createFromOptions(audio, {
+        baseOptions: {
+            modelAssetPath: "https://tfhub.dev/google/lite-model/yamnet/classification/tflite/1?lite-format=tflite"
+        },
+        maxResults: 10,  // Top 10 classifications
+        scoreThreshold: 0.3  // Minimum confidence
+    });
+
+    console.log("MediaPipe Audio Classifier initialized");
+}
+
+async function analyzeUploadedAudio(audioFile) {
+    /**
+     * Analyze uploaded audio file for instrument/percussion detection
+     * Supplements standard mel-spectrogram features
+     */
+
+    // Decode audio
+    const audioContext = new AudioContext({ sampleRate: 16000 });
+    const arrayBuffer = await audioFile.arrayBuffer();
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+    const audioData = audioBuffer.getChannelData(0);
+
+    // Analyze in chunks (16384 samples = ~1 second at 16kHz)
+    const chunkSize = 16384;
+    const results = [];
+
+    for (let i = 0; i < audioData.length; i += chunkSize) {
+        const chunk = audioData.slice(i, i + chunkSize);
+
+        // Classify chunk
+        const result = audioClassifier.classify(chunk);
+
+        results.push({
+            timestamp: i / audioBuffer.sampleRate,
+            classifications: result[0].classifications[0].categories.map(cat => ({
+                label: cat.categoryName,
+                score: cat.score,
+                index: cat.index
+            }))
+        });
+    }
+
+    // Process and aggregate results
+    const analysis = processAudioClassifications(results);
+
+    // Send to backend for integration with chart generation
+    await fetch('/api/submit_audio_classification', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            audio_id: audioFile.name,
+            classifications: results,
+            analysis: analysis
+        })
+    });
+
+    return analysis;
+}
+
+function processAudioClassifications(results) {
+    /**
+     * Extract rhythm-relevant features from classifications
+     */
+
+    const percussionCategories = ['Drum', 'Percussion', 'Snare_drum', 'Bass_drum',
+                                 'Cymbal', 'Hi-hat', 'Tambourine', 'Clap'];
+
+    const melodicCategories = ['Music', 'Singing', 'Guitar', 'Piano',
+                              'Synthesizer', 'Bass'];
+
+    // Aggregate percussion vs melodic content over time
+    const timeline = results.map(r => {
+        let percussionScore = 0;
+        let melodicScore = 0;
+
+        r.classifications.forEach(cat => {
+            const label = cat.label;
+            if (percussionCategories.some(p => label.includes(p))) {
+                percussionScore += cat.score;
+            }
+            if (melodicCategories.some(m => label.includes(m))) {
+                melodicScore += cat.score;
+            }
+        });
+
+        return {
+            timestamp: r.timestamp,
+            percussion: percussionScore,
+            melodic: melodicScore,
+            dominant: percussionScore > melodicScore ? 'percussion' : 'melodic'
+        };
+    });
+
+    // Detect percussion events (sudden increases)
+    const percussionEvents = [];
+    for (let i = 1; i < timeline.length; i++) {
+        const delta = timeline[i].percussion - timeline[i-1].percussion;
+        if (delta > 0.3) {  // Threshold for percussion onset
+            percussionEvents.push({
+                timestamp: timeline[i].timestamp,
+                strength: delta
+            });
+        }
+    }
+
+    return {
+        timeline: timeline,
+        percussion_events: percussionEvents,
+        avg_percussion_ratio: timeline.reduce((sum, t) => sum + t.percussion, 0) / timeline.length,
+        avg_melodic_ratio: timeline.reduce((sum, t) => sum + t.melodic, 0) / timeline.length
+    };
+}

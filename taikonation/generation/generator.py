@@ -9,7 +9,96 @@ from taikonation.models.transformer import TaikoTransformer
 from taikonation.data.tokenization import TaikoTokenizer
 from taikonation.data.audio_processing import get_audio_features
 from taikonation.data.dataset import DIFFICULTY_MAP
+from taikonation.data.mediapipe_audio import MediaPipeAudioAnalyzer
 from web.helpers import atomic_write
+
+class EnhancedChartGenerator:
+    """
+    Chart generator using both standard audio features and MediaPipe classifications
+    """
+
+    def __init__(self, model, use_mediapipe=True):
+        self.model = model
+        self.use_mediapipe = use_mediapipe
+        self.mediapipe_analyzer = MediaPipeAudioAnalyzer() if use_mediapipe else None
+
+    def generate(self, audio_path, difficulty, mediapipe_data=None):
+        """
+        Generate chart with optional MediaPipe enhancement
+
+        Args:
+            audio_path: Path to audio file
+            difficulty: Target difficulty level
+            mediapipe_data: Optional dict with MediaPipe classifications
+        """
+
+        # Load standard mel features (your existing code)
+        mel_features = get_audio_features(audio_path)
+
+        # Enhance with MediaPipe if available
+        if mediapipe_data and self.use_mediapipe:
+            features = self.mediapipe_analyzer.integrate_with_existing_features(
+                mel_features,
+                mediapipe_data['classifications']
+            )
+
+            # Detect sections for structural guidance
+            sections = self.mediapipe_analyzer.detect_chart_sections(
+                mediapipe_data['classifications']
+            )
+
+            # Use sections to guide generation
+            chart = self.generate_with_sections(features, difficulty, sections)
+        else:
+            # Standard generation
+            chart = self.generate_standard(mel_features, difficulty)
+
+        return chart
+
+    def generate_with_sections(self, features, difficulty, sections):
+        """
+        Generate chart respecting detected musical sections
+
+        Percussion-heavy sections → more dense patterns
+        Melodic sections → sparser, more melodic following
+        """
+
+        charts = []
+
+        for section in sections:
+            # Calculate frame indices
+            start_frame = int(section['start'] / 0.0232)
+            end_frame = int(section['end'] / 0.0232)
+
+            section_features = features[start_frame:end_frame]
+
+            # Adjust generation parameters based on section type
+            if section['type'] == 'instrumental':
+                # Higher note density for percussion sections
+                density_bias = 1.2
+            else:
+                # Lower density for melodic sections
+                density_bias = 0.8
+
+            section_chart = generate_chart(
+                self.model,
+                section_features,
+                TaikoTokenizer(),
+                difficulty,
+                load_config('config/default.yaml'),
+                'cpu',
+                density_bias=density_bias
+            )
+
+            charts.append(section_chart)
+
+        # Concatenate sections
+        full_chart = np.concatenate(charts)
+
+        return full_chart
+
+    def generate_standard(self, features, difficulty):
+        return generate_chart(self.model, features, TaikoTokenizer(), difficulty, load_config('config/default.yaml'), 'cpu')
 
 def load_config(config_path):
     """Loads a YAML configuration file."""
@@ -68,7 +157,8 @@ def generate_chart(
     config,
     device,
     temperature=1.0,
-    progress_callback: Optional[Callable[[int, str], None]] = None
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+    density_bias=1.0
 ):
     """
     Generate a chart with optional progress reporting.
@@ -95,6 +185,13 @@ def generate_chart(
 
         if temperature != 1.0:
             next_token_logits = next_token_logits / temperature
+
+        # Apply density bias
+        if density_bias != 1.0:
+            note_tokens = [i for i, token in tokenizer.id_to_token.items() if token not in tokenizer.special_tokens]
+            note_logits = next_token_logits[:, note_tokens]
+            biased_note_logits = note_logits * density_bias
+            next_token_logits[:, note_tokens] = biased_note_logits
 
         probabilities = torch.nn.functional.softmax(next_token_logits, dim=-1)
         next_token_id = torch.multinomial(probabilities, 1).item()

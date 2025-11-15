@@ -332,6 +332,23 @@
                               <i class="icon-settings"></i>Advanced Options
                             </button>
                           </div>
+                          <!-- Add checkbox to enable MediaPipe analysis -->
+                            <div class="config-group">
+                                <label class="toggle">
+                                    <input type="checkbox" id="use-mediapipe" checked>
+                                    <span class="toggle-slider"></span>
+                                    <span class="toggle-label">Enhanced Audio Analysis (MediaPipe)</span>
+                                </label>
+                                <small>Uses AI to detect instruments and percussion for better chart generation</small>
+                            </div>
+
+                            <!-- Progress indicator for audio analysis -->
+                            <div id="audio-analysis-progress" style="display: none;">
+                                <p>Analyzing audio with MediaPipe...</p>
+                                <div class="progress-bar">
+                                    <div class="progress-fill" id="mediapipe-progress"></div>
+                                </div>
+                            </div>
                         </div>
 
                         <!-- Step 3: Generation -->
@@ -604,6 +621,7 @@
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-audio/audio_bundle.js" crossorigin="anonymous"></script>
     <script src="static/js/app.js" defer></script>
     <div id="training-metrics-dashboard" style="display: none;">
         <div class="metrics-grid">

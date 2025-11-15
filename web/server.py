@@ -30,7 +30,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from dataclasses import dataclass, field
 
-from flask import Flask, request, jsonify, render_template, send_from_directory, send_file, abort
+from flask import Flask, request, jsonify, render_template, send_from_directory, send_file, abort, session
 from flask_socketio import SocketIO, emit
 from marshmallow import Schema, fields, ValidationError
 from werkzeug.utils import secure_filename
@@ -39,6 +39,8 @@ from enum import Enum
 
 from .helpers import error_response
 from functools import wraps
+from taikonation.data.tokenization import TaikoTokenizer
+from config_schema import ConfigSchema
 
 class APIError(Exception):
     """Custom API exception with user-friendly messages"""
@@ -106,7 +108,6 @@ def validate_difficulty(f):
 # Import existing TaikoNation modules
 try:
     from taikonation.data.audio_processing import get_audio_features, augment_spectrogram
-    from taikonation.models.transformer import TaikoTransformer
     from taikonation.data.dataset import get_transformer_data_loaders, DIFFICULTY_MAP
     from taikonation.data.tokenization import TaikoTokenizer
     from config_schema import ConfigSchema
@@ -685,6 +686,67 @@ TaikoNationServer.setup_config_watcher = setup_config_watcher
 
 # Create server instance
 server = TaikoNationServer()
+
+@app.route('/api/submit_audio_classification', methods=['POST'])
+def submit_audio_classification():
+    """
+    Receive MediaPipe audio classifications from web frontend
+    Store for use in chart generation
+    """
+    from taikonation.data.mediapipe_audio import MediaPipeAudioAnalyzer
+    mediapipe_analyzer = MediaPipeAudioAnalyzer()
+    data = request.json
+
+    audio_id = data['audio_id']
+    classifications = data['classifications']
+    analysis = data['analysis']
+
+    # Store in session or database
+    session[f'audio_classification_{audio_id}'] = {
+        'classifications': classifications,
+        'analysis': analysis,
+        'timestamp': datetime.now().isoformat()
+    }
+
+    # Detect chart sections for structural generation
+    sections = mediapipe_analyzer.detect_chart_sections(classifications)
+
+    return jsonify({
+        'status': 'success',
+        'message': 'Audio classification received',
+        'sections': sections,
+        'percussion_ratio': analysis['avg_percussion_ratio'],
+        'melodic_ratio': analysis['avg_melodic_ratio']
+    })
+
+@app.route('/api/generate_chart_with_audio_analysis', methods=['POST'])
+def generate_chart_with_audio_analysis():
+    """
+    Enhanced chart generation using both mel features and MediaPipe classifications
+    """
+    data = request.json
+
+    audio_path = data['audio_path']
+    audio_id = data.get('audio_id', os.path.basename(audio_path))
+
+    # Load existing mel features
+    mel_features = get_audio_features(audio_path)
+
+    # Get MediaPipe classifications from session
+    classification_data = session.get(f'audio_classification_{audio_id}')
+
+    model_path = os.path.join(MODEL_FOLDER, 'taiko_transformer.pth')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = load_model(model_path, server.config, device)
+
+    generator = EnhancedChartGenerator(model)
+    chart = generator.generate(audio_path, data['difficulty'], mediapipe_data=classification_data)
+
+    return jsonify({
+        'status': 'success',
+        'chart': chart.tolist(),
+        'used_classification': classification_data is not None
+    })
 
 
 @app.route('/api/research/experiments')
