@@ -5,6 +5,7 @@ import torch
 import yaml
 import numpy as np
 
+from taikonation.utils.quantization import apply_dynamic_quantization
 from taikonation.models.transformer import TaikoTransformer
 from taikonation.data.tokenization import TaikoTokenizer
 from taikonation.data.audio_processing import get_audio_features
@@ -106,7 +107,7 @@ def load_config(config_path):
         config = yaml.safe_load(f)
     return config
 
-def load_model(checkpoint_path, config, device):
+def load_model(checkpoint_path, config, device, quantize=False):
     """Loads a trained model from a checkpoint."""
     # We need to know the vocab size and number of genres/difficulties to init the model.
     # This info should ideally be saved in the checkpoint. For now, let's assume
@@ -143,6 +144,14 @@ def load_model(checkpoint_path, config, device):
         print(f"Warning: Model checkpoint not found at {checkpoint_path}. Using random weights.")
 
     model.eval()
+
+    if quantize:
+        # We can only quantize models on the CPU
+        if device.type == 'cpu':
+            model = apply_dynamic_quantization(model)
+        else:
+            print("Warning: Quantization is only supported on CPU. Skipping.")
+
     return model
 
 from typing import Callable, Optional
@@ -300,6 +309,7 @@ def main():
     parser.add_argument("--artist", default=None, help="Song artist for .osu metadata.")
     parser.add_argument("--source", default="", help="Source of the song for .osu metadata.")
     parser.add_argument("--tags", default="", help="Tags for .osu metadata.")
+    parser.add_argument("--quantize", action="store_true", help="Apply INT8 dynamic quantization to the model (CPU only).")
 
     args = parser.parse_args()
 
@@ -323,7 +333,7 @@ def main():
     # --- Load Everything ---
     config = load_config(args.config)
     tokenizer = TaikoTokenizer()
-    model = load_model(args.model_path, config, device)
+    model = load_model(args.model_path, config, device, quantize=args.quantize)
 
     difficulty_str = args.difficulty.lower()
     if difficulty_str not in DIFFICULTY_MAP:
