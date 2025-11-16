@@ -50,7 +50,7 @@ class TestCli(unittest.TestCase):
         """Test that generate_chart.py produces a non-empty .osu file."""
         command = [
             sys.executable,
-            "taikonation/generation/generator.py",
+            "-m", "taikonation.generation.generator",
             self.model_path,
             self.sample_npy_path,
             self.output_osu_path,
@@ -67,6 +67,30 @@ class TestCli(unittest.TestCase):
             content = f.read()
             self.assertIn("[HitObjects]", content)
             self.assertTrue(len(content.splitlines()) > 10) # Check for a reasonable number of lines
+
+    def test_generate_chart_cli_quantized(self):
+        """Test that the --quantize flag works and produces a valid chart."""
+        command = [
+            sys.executable,
+            "-m", "taikonation.generation.generator",
+            self.model_path,
+            self.sample_npy_path,
+            self.output_osu_path,
+            "--difficulty", "oni",
+            "--seed", "42",
+            "--quantize"
+        ]
+        result = subprocess.run(command, capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 0, f"CLI script failed with output:\\n{result.stderr}")
+        self.assertIn("Applying INT8 dynamic quantization to compatible layers...", result.stdout)
+
+        self.assertTrue(os.path.exists(self.output_osu_path))
+
+        with open(self.output_osu_path, "r") as f:
+            content = f.read()
+            self.assertIn("[HitObjects]", content)
+            self.assertTrue(len(content.splitlines()) > 10)
 
 if __name__ == '__main__':
     unittest.main()
