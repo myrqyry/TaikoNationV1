@@ -37,6 +37,67 @@ from werkzeug.utils import secure_filename
 from werkzeug.security import safe_join
 from enum import Enum
 
+def verify_installation():
+    """Verify that TaikoNation is properly installed"""
+    import sys
+    from pathlib import Path
+
+    # Check if running from correct directory
+    current_dir = Path(__file__).parent
+    project_root = current_dir.parent
+
+    # Verify key project files exist
+    required_files = [
+        project_root / 'setup.py',
+        project_root / 'taikonation' / '__init__.py',
+        project_root / 'requirements.txt'
+    ]
+
+    missing_files = [f for f in required_files if not f.exists()]
+    if missing_files:
+        print("ERROR: Project structure appears incomplete!")
+        print("Missing files:")
+        for f in missing_files:
+            print(f"  - {f}")
+        print("\nPlease ensure you're running from the web/ directory inside the TaikoNation project.")
+        sys.exit(1)
+
+    # Try importing core modules
+    try:
+        import taikonation
+    except ImportError:
+        print("ERROR: TaikoNation package not installed!")
+        print("\nPlease install the package first:")
+        print("  cd ..")
+        print("  pip install -e .")
+        print("\nOr install all dependencies:")
+        print("  pip install -r requirements.txt")
+        print("  pip install -r web/requirements.txt")
+        sys.exit(1)
+
+    # Verify critical dependencies
+    missing_deps = []
+    critical_modules = ['torch', 'librosa', 'flask', 'flask_socketio', 'yaml', 'numpy']
+
+    for module in critical_modules:
+        try:
+            __import__(module)
+        except ImportError:
+            missing_deps.append(module)
+
+    if missing_deps:
+        print("ERROR: Missing required dependencies:")
+        for dep in missing_deps:
+            print(f"  - {dep}")
+        print("\nInstall missing dependencies:")
+        print("  pip install -r requirements.txt")
+        sys.exit(1)
+
+    print("✓ Installation verified successfully")
+
+# Call verification before other imports
+verify_installation()
+
 from .helpers import error_response
 from functools import wraps
 from taikonation.data.tokenization import TaikoTokenizer
@@ -167,6 +228,10 @@ except Exception as e:
     logger.warning(f'Eventlet not usable, falling back to threading async mode: {e}')
 
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode=async_mode)
+
+# Initialize tasks module with socketio reference
+from web import tasks
+tasks.set_socketio(socketio)
 
 # Optional API token for protecting endpoints. If not set, endpoints remain open (dev mode).
 API_TOKEN = os.environ.get('TAIKONATION_API_TOKEN')
@@ -1426,58 +1491,79 @@ def create_research_archive(dataset):
     zip_buffer.seek(0)
     return zip_buffer, 'research_dataset.zip', 'application/zip'
 
-if __name__ == '__main__':
-    # Determine port from environment or first CLI arg (useful for avoiding conflicts)
-    default_port = int(os.environ.get('TAIKONATION_PORT', 5000))
-    cli_port = None
-    try:
-        if len(sys.argv) > 1 and sys.argv[1].isdigit():
-            cli_port = int(sys.argv[1])
-    except Exception:
-        cli_port = None
+def find_available_port(preferred_port: int, max_attempts: int = 10) -> int:
+    """Find an available port, starting with preferred port"""
+    import socket
 
-    port_to_use = cli_port or default_port
+    for offset in range(max_attempts):
+        test_port = preferred_port + offset
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-    def _is_port_free(host: str, port: int) -> bool:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            # Use SO_REUSEADDR to avoid TIME_WAIT issues on rapid restarts
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind((host, port))
-            s.close()
-            return True
+            sock.bind(('127.0.0.1', test_port))
+            sock.close()
+            return test_port
         except OSError:
-            try:
-                s.close()
-            except Exception:
-                pass
-            return False
+            sock.close()
+            continue
 
-    # Force the server to use the requested fixed port (7410 by default)
-    # If it's in use, log a warning and still attempt to bind so the user sees the failure.
-    # The user explicitly requested a fixed port rather than a random fallback.
-    FIXED_PORT = 7410
-    # Allow CLI or env var to override, but default to FIXED_PORT when not provided
-    port_to_use = cli_port or int(os.environ.get('TAIKONATION_PORT', FIXED_PORT))
-    if not _is_port_free('127.0.0.1', port_to_use):
-        logger.warning(f"Requested port {port_to_use} appears to be in use. The server will still try to bind and may fail.")
+    raise RuntimeError(f"Could not find available port after {max_attempts} attempts starting from {preferred_port}")
 
-    print("Starting TaikoNation Studio Web Server...")
-    print(f"Server will be available at: http://localhost:{port_to_use}")
-    print(f"Make sure you're running from the web/ directory inside TaikoNationV1/")
+if __name__ == '__main__':
+    # Determine port with smart fallback
+    PREFERRED_PORT = 7410
+    cli_port = None
+
+    # Parse CLI arguments
+    if len(sys.argv) > 1:
+        try:
+            cli_port = int(sys.argv[1])
+        except (ValueError, IndexError):
+            pass
+
+    # Priority: CLI arg > Environment variable > Preferred port
+    requested_port = cli_port or int(os.environ.get('TAIKONATION_PORT', PREFERRED_PORT))
 
     try:
-        # Run the Flask-SocketIO server
+        # Find available port (will use requested if free, or find next available)
+        port_to_use = find_available_port(requested_port)
+
+        if port_to_use != requested_port:
+            logger.warning(f"Requested port {requested_port} was in use. Using port {port_to_use} instead.")
+            print(f"⚠ Port {requested_port} was in use, using {port_to_use} instead")
+    except RuntimeError as e:
+        logger.error(f"Could not find available port: {e}")
+        print(f"ERROR: {e}")
+        print("Please specify a different port range or close applications using these ports.")
+        sys.exit(1)
+
+    print("=" * 60)
+    print("TaikoNation Studio Web Server")
+    print("=" * 60)
+    print(f"Server URL: http://localhost:{port_to_use}")
+    print(f"Server URL (network): http://{socket.gethostname()}.local:{port_to_use}")
+    print(f"Press Ctrl+C to stop the server")
+    print("=" * 60)
+
+    try:
         allow_unsafe = os.environ.get('TAIKONATION_ALLOW_UNSAFE_WERKZEUG', 'true').lower() in ('1', 'true', 'yes')
         socketio.run(
             app,
             host='127.0.0.1',
             port=port_to_use,
             debug=True,
-            use_reloader=False,  # Disable reloader to prevent issues with background tasks
+            use_reloader=False,
             allow_unsafe_werkzeug=allow_unsafe
         )
+    except KeyboardInterrupt:
+        print("\n\nShutting down gracefully...")
+    except Exception as e:
+        logger.error(f"Server error: {e}", exc_info=True)
+        print(f"\nERROR: Server failed to start: {e}")
+        sys.exit(1)
     finally:
         if hasattr(server, 'observer') and server.observer.is_alive():
             server.observer.stop()
             server.observer.join()
+        print("Server stopped.")
