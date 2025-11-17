@@ -1,10 +1,10 @@
-# TaikoNationV1 (myrqyry fork)
+# rhythm-tatsujin
 
 _A cutting-edge AI system for human-like Taiko no Tatsujin beatmap generation — now with a full-featured web interface, modern transformer architecture, and integrated human evaluation._
 
 ## Overview
 
-TaikoNationV1 is the modern successor to the influential research of ["TaikoNation: Patterning-focused Chart Generation for Rhythm Action Games"](https://arxiv.org/abs/2107.12506) by Emily Halina and Matthew Guzdial. This project extends the original system with advanced transformer models, pattern-aware memory, multi-difficulty control, and a production-ready web/UI layer for both experimentation and real-world use.
+rhythm-tatsujin is the modern successor to the influential research of ["TaikoNation: Patterning-focused Chart Generation for Rhythm Action Games"](https://arxiv.org/abs/2107.12506) by Emily Halina and Matthew Guzdial, and originally forked from the original ["GitHub repository"](https://github.com/emily-halina/TaikoNationV1). This project extends the original system with advanced transformer models, pattern-aware memory, multi-difficulty control, and a production-ready web/UI layer for both experimentation and real-world use.
 
 ***
 
@@ -27,7 +27,7 @@ TaikoNationV1 is the modern successor to the influential research of ["TaikoNati
 
 ***
 
-## Installation
+## Installation (Rapidly changing so probably OOD)
 
 ### Prerequisites
 
@@ -103,22 +103,12 @@ python server.py
 - **Human:** Fun, musicality, playability, pattern logic, difficulty accuracy (all 1–10 scale)
 - **RLHF pipeline:** Human ratings are saved for reward learning
 
-***
-
-## Contributions
-
-We welcome PRs for:
-- Model architectures & optimizations
-- Audio processing, pattern analysis, and visualization enhancements
-- Web/dashboard UX and new export formats
-- Data augmentation and chart importers
-- RLHF integration and evaluation analysis
 
 ***
 
 ## Cite Us
 
-If you use our system, please cite:
+If you use this system, please cite the original author:
 
 ```bibtex
 @inproceedings{halina2021taikonation,
@@ -126,12 +116,6 @@ If you use our system, please cite:
   author={Halina, Emily and Guzdial, Matthew},
   booktitle={Proceedings of the Twelfth Workshop on Procedural Content Generation},
   year={2021}
-}
-@misc{taikonationv1_2025,
-  title={TaikoNationV1: Modern Implementation with Multi-Difficulty and Pattern-Aware Generation},
-  author={myrqyry},
-  year={2025},
-  url={https://github.com/myrqyry/TaikoNationV1}
 }
 ```
 
