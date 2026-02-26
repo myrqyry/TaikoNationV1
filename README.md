@@ -33,7 +33,7 @@ rhythm-tatsujin is the modern successor to the influential research of ["TaikoNa
 
 - Python 3.8+
 - PyTorch 1.12+
-- NumPy, SciPy, librosa, Flask
+- NumPy, SciPy, librosa, FastAPI
 - (Optional: ffmpeg, TensorFlow, CUDA for max speed)
 
 ### Project Setup
@@ -53,7 +53,7 @@ pip install -r requirements.txt
 
 ```bash
 cd web
-python server.py
+uvicorn server_fastapi:socket_app --host 127.0.0.1 --port 5000 --reload
 # Visit http://localhost:5000 to access the dashboard
 ```
 

@@ -40,7 +40,7 @@ TaikoNationV1/
    - `web-interface-index.html` → `web/index.html`
    - `web-interface-styles.css` → `web/static/css/styles.css`
    - `web-interface-app.js` → `web/static/js/app.js`
-   - `web-interface-server.py` → `web/server.py`
+   - `web-interface-server.py` → `web/server_fastapi.py`
    - `web-requirements.txt` → `web/requirements.txt`
 
 3. **Install dependencies**:
@@ -54,7 +54,7 @@ TaikoNationV1/
 1. **Start the server**:
    ```bash
    cd web
-   python server.py
+   uvicorn server_fastapi:socket_app --host 127.0.0.1 --port 5000 --reload
    ```
 
 2. **Access the interface**: Open http://localhost:5000 in your browser
@@ -136,15 +136,15 @@ This data can be used for reinforcement learning from human feedback (RLHF) to i
 
 **Import Errors**: Make sure you're running the server from the `web/` directory inside TaikoNationV1, and that all TaikoNation dependencies are installed.
 
-**Port Issues**: If port 5000 is in use, modify the port in `server.py`.
+**Port Issues**: If port 5000 is in use, modify the port in your `uvicorn` command.
 
 **File Upload Issues**: Check that the `input_songs/` and `output/` directories exist and are writable.
 
 **Training Issues**: Verify that your training data is properly formatted in the `input_charts_nr/` directory.
 
-## FastAPI migration (optional, recommended)
+## FastAPI runtime (default)
 
-This repository also includes an experimental FastAPI ASGI server at `web/server_fastapi.py` which provides the same API surface but uses an async Socket.IO server and works well with `uvicorn` (no eventlet required).
+This repository also includes a FastAPI ASGI server at `web/server_fastapi.py` which provides the same API surface but uses an async Socket.IO server and works well with `uvicorn` (no eventlet required).
 
 Why use FastAPI?
 - Async first — works better with asyncio-based workers and modern async libraries.
@@ -179,7 +179,7 @@ Background jobs and workers
 - The FastAPI server includes simulated background generation for demo purposes. For real training and chart generation you should run heavy jobs in a separate worker process (Celery, RQ, or a dedicated microservice) and emit progress via Socket.IO or push to a shared database.
 
 Compatibility notes
-- The original Flask server `web/server.py` remains in the repo. You can keep it for development or backward-compatibility, but we recommend using the FastAPI server for new deployments.
+- FastAPI is the primary runtime for this project. The legacy Flask server can be kept only for reference during migration windows.
 
 If you want, I can:
 - Add a small `docker-compose` recipe to run the FastAPI server + a worker + Redis for background tasks.
