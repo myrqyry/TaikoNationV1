@@ -6,13 +6,16 @@ mounted as an ASGI app. It mirrors the main API surface from the Flask server
 but uses async handling and lazy imports for heavy ML dependencies.
 """
 import os
+import io
+import json
+import zipfile
 import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks, Depends, Header
-from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
+from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import socketio
 
@@ -41,6 +44,9 @@ app.mount('/static', StaticFiles(directory=str(BASE_DIR / 'static')), name='stat
 # In-memory state (demo)
 system_logs = []
 generated_charts = []
+human_evaluations = []
+model_configurations = []
+audio_features = []
 active_models: Dict[str, Dict[str, Any]] = {}
 
 
@@ -52,7 +58,7 @@ def require_token(token: Optional[str] = None):
     raise HTTPException(status_code=401, detail='Unauthorized')
 
 
-def token_auth(authorization: Optional[str] = Header(None), token_form: Optional[str] = Form(None)):
+def token_auth(authorization: Optional[str] = Header(None), token_form: Optional[str] = None):
     """Dependency that extracts token from Authorization header or form and validates it."""
     token = token_form or (authorization or '').replace('Bearer ', '')
     return require_token(token)
@@ -104,11 +110,11 @@ async def api_dashboard():
 
 
 @app.post('/api/upload-audio')
-async def api_upload_audio(file: UploadFile = File(...)):
-    if not file.filename:
+async def api_upload_audio(filename: str, content: bytes):
+    if not filename:
         raise HTTPException(status_code=400, detail='No file provided')
 
-    filename = Path(file.filename).name
+    filename = Path(filename).name
     allowed = {'.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac'}
     if Path(filename).suffix.lower() not in allowed:
         raise HTTPException(status_code=400, detail='Unsupported file type')
@@ -116,7 +122,6 @@ async def api_upload_audio(file: UploadFile = File(...)):
     dest = UPLOAD_FOLDER / filename
     # Stream to disk
     with open(dest, 'wb') as f:
-        content = await file.read()
         f.write(content)
 
     # Minimal processing: return title
@@ -127,12 +132,12 @@ async def api_upload_audio(file: UploadFile = File(...)):
 
 @app.post('/api/generate-chart')
 async def api_generate_chart(
-    title: str = Form('Untitled'),
-    artist: str = Form('Unknown'),
-    bpm: int = Form(120),
-    genre: str = Form('electronic'),
-    difficulty: str = Form('oni'),
-    pattern_style: str = Form('balanced'),
+    title: str = 'Untitled',
+    artist: str = 'Unknown',
+    bpm: int = 120,
+    genre: str = 'electronic',
+    difficulty: str = 'oni',
+    pattern_style: str = 'balanced',
     _auth: bool = Depends(token_auth)
 ):
     await add_system_log('info', f'Chart generation started: {title}')
@@ -178,7 +183,7 @@ async def api_get_chart_for_evaluation():
 
 
 @app.post('/api/submit-evaluation')
-async def api_submit_evaluation(chart_id: int = Form(...), fun: int = Form(...), musicality: int = Form(...), playability: int = Form(...), coherence: int = Form(...), comments: str = Form('')):
+async def api_submit_evaluation(chart_id: int, fun: int, musicality: int, playability: int, coherence: int, comments: str = ''):
     for chart in generated_charts:
         if chart['id'] == chart_id:
             ratings = [fun, musicality, playability, coherence]
@@ -187,6 +192,30 @@ async def api_submit_evaluation(chart_id: int = Form(...), fun: int = Form(...),
             return {'success': True}
     raise HTTPException(status_code=404, detail='Chart not found')
 
+
+
+
+@app.get('/api/research/export-dataset')
+async def api_research_export_dataset():
+    """Export the current in-memory research dataset as a zip archive."""
+    export_payload = {
+        'generated_charts': generated_charts,
+        'human_evaluations': human_evaluations,
+        'model_configurations': model_configurations,
+        'audio_features': audio_features,
+        'exported_at': datetime.utcnow().isoformat()
+    }
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr('dataset.json', json.dumps(export_payload, indent=2))
+
+    buffer.seek(0)
+    return StreamingResponse(
+        buffer,
+        media_type='application/zip',
+        headers={'Content-Disposition': 'attachment; filename=research_dataset.zip'}
+    )
 
 @sio.event
 async def connect(sid, environ):
