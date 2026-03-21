@@ -12,7 +12,7 @@ authors = [
 ]
 description = "A cutting-edge AI system for human-like Taiko no Tatsujin beatmap generation."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -20,5 +20,5 @@ classifiers = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/myrqyry/TaikoNationV1"
-"Issues" = "https://github.com/myrqyry/TaikoNationV1/issues"
+"Homepage" = "https://github.com/myrqyry/rhythm-tatsujin"
+"Issues" = "https://github.com/myrqyry/rhythm-tatsujin/issues"

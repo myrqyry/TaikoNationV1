@@ -167,47 +167,63 @@ async def api_generate_chart(
     active_tasks.insert(0, task)
 
     async def simulate_generation():
-        store.update_task(
-            task['id'],
-            status='running',
-            progress=0,
-            message='Generation started',
-            updated_at=datetime.utcnow().isoformat(),
-        )
-        for p in range(0, 101, 10):
+        try:
             store.update_task(
                 task['id'],
                 status='running',
-                progress=p,
-                message='Generating chart',
+                progress=0,
+                message='Generation started',
                 updated_at=datetime.utcnow().isoformat(),
             )
-            await sio.emit('generation_progress', {'task_id': task['id'], 'progress': p})
-            await asyncio.sleep(0.5)
+            for p in range(0, 101, 10):
+                current_task = store.get_task(task['id']) or {}
+                if current_task.get('status') == 'cancelled':
+                    await add_system_log('warning', f'Chart generation cancelled: task {task["id"]}')
+                    active_tasks[:] = store.list_tasks(limit=100)
+                    return
 
-        chart = {
-            'title': title,
-            'artist': artist,
-            'difficulty': difficulty,
-            'bpm': bpm,
-            'genre': genre,
-            'rating': 0,
-            'plays': 0,
-            'created_at': datetime.utcnow().isoformat()
-        }
-        stored_chart = store.create_chart(chart)
-        generated_charts.insert(0, stored_chart)
-        store.update_task(
-            task['id'],
-            status='completed',
-            progress=100,
-            message='Generation completed',
-            result={'chart_id': stored_chart['id']},
-            updated_at=datetime.utcnow().isoformat(),
-        )
-        active_tasks[:] = store.list_tasks(limit=100)
-        await sio.emit('chart_generated', {'chart': stored_chart})
-        await add_system_log('success', f'Chart generated: {title}')
+                store.update_task(
+                    task['id'],
+                    status='running',
+                    progress=p,
+                    message='Generating chart',
+                    updated_at=datetime.utcnow().isoformat(),
+                )
+                await sio.emit('generation_progress', {'task_id': task['id'], 'progress': p})
+                await asyncio.sleep(0.5)
+
+            chart = {
+                'title': title,
+                'artist': artist,
+                'difficulty': difficulty,
+                'bpm': bpm,
+                'genre': genre,
+                'rating': 0,
+                'plays': 0,
+                'created_at': datetime.utcnow().isoformat()
+            }
+            stored_chart = store.create_chart(chart)
+            generated_charts.insert(0, stored_chart)
+            store.update_task(
+                task['id'],
+                status='completed',
+                progress=100,
+                message='Generation completed',
+                result={'chart_id': stored_chart['id']},
+                updated_at=datetime.utcnow().isoformat(),
+            )
+            active_tasks[:] = store.list_tasks(limit=100)
+            await sio.emit('chart_generated', {'chart': stored_chart})
+            await add_system_log('success', f'Chart generated: {title}')
+        except Exception as exc:
+            store.update_task(
+                task['id'],
+                status='failed',
+                message=str(exc),
+                updated_at=datetime.utcnow().isoformat(),
+            )
+            active_tasks[:] = store.list_tasks(limit=100)
+            await add_system_log('error', f'Chart generation failed: task {task["id"]}')
 
     # schedule background task
     asyncio.create_task(simulate_generation())
@@ -226,6 +242,24 @@ async def api_task(task_id: int):
     if not task:
         raise HTTPException(status_code=404, detail='Task not found')
     return task
+
+
+@app.post('/api/tasks/{task_id}/cancel')
+async def api_cancel_task(task_id: int):
+    task = store.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail='Task not found')
+    if task.get('status') in {'completed', 'failed', 'cancelled'}:
+        return {'success': False, 'message': f"Task already {task.get('status')}"}
+    store.update_task(
+        task_id,
+        status='cancelled',
+        message='Cancelled by user',
+        updated_at=datetime.utcnow().isoformat(),
+    )
+    active_tasks[:] = store.list_tasks(limit=100)
+    await add_system_log('warning', f'Task cancelled: {task_id}')
+    return {'success': True, 'task_id': task_id, 'status': 'cancelled'}
 
 
 @app.get('/api/charts')

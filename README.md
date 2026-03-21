@@ -27,11 +27,11 @@ rhythm-tatsujin is the modern successor to the influential research of ["TaikoNa
 
 ***
 
-## Installation (Rapidly changing so probably OOD)
+## Installation
 
 ### Prerequisites
 
-- Python 3.8+
+- Python 3.10+
 - PyTorch 1.12+
 - NumPy, SciPy, librosa, FastAPI
 - (Optional: ffmpeg, TensorFlow, CUDA for max speed)
@@ -39,8 +39,8 @@ rhythm-tatsujin is the modern successor to the influential research of ["TaikoNa
 ### Project Setup
 
 ```bash
-git clone https://github.com/myrqyry/TaikoNationV1.git
-cd TaikoNationV1
+git clone https://github.com/myrqyry/rhythm-tatsujin.git
+cd rhythm-tatsujin
 pip install -r requirements.txt
 # Optionally: pip install -r web/requirements.txt  # for web interface
 ```
