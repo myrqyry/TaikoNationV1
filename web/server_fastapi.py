@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import socketio
+from web.persistence import StudioStore
 
 # Project paths
 BASE_DIR = Path(__file__).resolve().parent
@@ -48,6 +49,19 @@ human_evaluations = []
 model_configurations = []
 audio_features = []
 active_models: Dict[str, Dict[str, Any]] = {}
+store = StudioStore(CHART_OUTPUT_FOLDER / "studio.sqlite3")
+
+
+def _load_persisted_state():
+    """Load persisted entities for compatibility with existing callers/tests."""
+    system_logs[:] = store.list_logs(limit=200)
+    generated_charts[:] = store.list_charts()
+    human_evaluations[:] = store.list_evaluations()
+    model_configurations[:] = store.get_json("model_configurations", [])
+    audio_features[:] = store.get_json("audio_features", [])
+
+
+_load_persisted_state()
 
 
 def require_token(token: Optional[str] = None):
@@ -69,6 +83,7 @@ async def add_system_log(level: str, message: str):
     system_logs.insert(0, entry)
     # Keep last 200
     del system_logs[200:]
+    store.append_log(entry)
     await sio.emit('system_log', entry)
 
 
@@ -148,7 +163,6 @@ async def api_generate_chart(
             await asyncio.sleep(0.5)
 
         chart = {
-            'id': len(generated_charts) + 1,
             'title': title,
             'artist': artist,
             'difficulty': difficulty,
@@ -158,8 +172,9 @@ async def api_generate_chart(
             'plays': 0,
             'created_at': datetime.utcnow().isoformat()
         }
-        generated_charts.append(chart)
-        await sio.emit('chart_generated', {'chart': chart})
+        stored_chart = store.create_chart(chart)
+        generated_charts.insert(0, stored_chart)
+        await sio.emit('chart_generated', {'chart': stored_chart})
         await add_system_log('success', f'Chart generated: {title}')
 
     # schedule background task
@@ -169,28 +184,35 @@ async def api_generate_chart(
 
 @app.get('/api/charts')
 async def api_charts():
+    generated_charts[:] = store.list_charts()
     return {'charts': generated_charts}
 
 
 @app.get('/api/get-chart-for-evaluation')
 async def api_get_chart_for_evaluation():
-    if generated_charts:
-        # return first unrated chart
-        for c in generated_charts:
-            if c.get('rating', 0) == 0:
-                return c
+    chart = store.get_unrated_chart()
+    if chart:
+        return chart
     raise HTTPException(status_code=404, detail='No charts available for evaluation')
 
 
 @app.post('/api/submit-evaluation')
 async def api_submit_evaluation(chart_id: int, fun: int, musicality: int, playability: int, coherence: int, comments: str = ''):
-    for chart in generated_charts:
-        if chart['id'] == chart_id:
-            ratings = [fun, musicality, playability, coherence]
-            chart['rating'] = sum(ratings) / len(ratings)
-            await add_system_log('success', f'Evaluation submitted for chart {chart_id}')
-            return {'success': True}
-    raise HTTPException(status_code=404, detail='Chart not found')
+    ok = store.submit_evaluation(
+        chart_id=chart_id,
+        fun=fun,
+        musicality=musicality,
+        playability=playability,
+        coherence=coherence,
+        comments=comments,
+        created_at=datetime.utcnow().isoformat(),
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail='Chart not found')
+    generated_charts[:] = store.list_charts()
+    human_evaluations[:] = store.list_evaluations()
+    await add_system_log('success', f'Evaluation submitted for chart {chart_id}')
+    return {'success': True}
 
 
 
@@ -198,6 +220,10 @@ async def api_submit_evaluation(chart_id: int, fun: int, musicality: int, playab
 @app.get('/api/research/export-dataset')
 async def api_research_export_dataset():
     """Export the current in-memory research dataset as a zip archive."""
+    generated_charts[:] = store.list_charts()
+    human_evaluations[:] = store.list_evaluations()
+    model_configurations[:] = store.get_json("model_configurations", model_configurations)
+    audio_features[:] = store.get_json("audio_features", audio_features)
     export_payload = {
         'generated_charts': generated_charts,
         'human_evaluations': human_evaluations,
