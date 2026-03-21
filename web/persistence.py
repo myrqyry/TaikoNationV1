@@ -69,6 +69,18 @@ class StudioStore:
                         key TEXT PRIMARY KEY,
                         value_json TEXT NOT NULL
                     );
+
+                    CREATE TABLE IF NOT EXISTS tasks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        task_type TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        progress INTEGER NOT NULL DEFAULT 0,
+                        message TEXT NOT NULL DEFAULT '',
+                        payload_json TEXT NOT NULL DEFAULT '{}',
+                        result_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
                     """
                 )
 
@@ -191,3 +203,87 @@ class StudioStore:
         except json.JSONDecodeError:
             return default
 
+    def create_task(self, *, task_type: str, payload: Dict[str, Any], created_at: str) -> Dict[str, Any]:
+        payload_json = json.dumps(payload)
+        with _LOCK:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO tasks(task_type, status, progress, message, payload_json, result_json, created_at, updated_at)
+                    VALUES(?, 'queued', 0, '', ?, '{}', ?, ?)
+                    """,
+                    (task_type, payload_json, created_at, created_at),
+                )
+                task_id = int(cur.lastrowid)
+        return self.get_task(task_id) or {}
+
+    def update_task(
+        self,
+        task_id: int,
+        *,
+        status: Optional[str] = None,
+        progress: Optional[int] = None,
+        message: Optional[str] = None,
+        result: Optional[Dict[str, Any]] = None,
+        updated_at: str,
+    ) -> bool:
+        fields = []
+        params: List[Any] = []
+        if status is not None:
+            fields.append("status = ?")
+            params.append(status)
+        if progress is not None:
+            fields.append("progress = ?")
+            params.append(int(progress))
+        if message is not None:
+            fields.append("message = ?")
+            params.append(message)
+        if result is not None:
+            fields.append("result_json = ?")
+            params.append(json.dumps(result))
+        fields.append("updated_at = ?")
+        params.append(updated_at)
+        params.append(task_id)
+        with _LOCK:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    f"UPDATE tasks SET {', '.join(fields)} WHERE id = ?",
+                    tuple(params),
+                )
+                return cur.rowcount > 0
+
+    def get_task(self, task_id: int) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, task_type, status, progress, message, payload_json, result_json, created_at, updated_at
+                FROM tasks
+                WHERE id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+        if not row:
+            return None
+        task = dict(row)
+        task["payload"] = json.loads(task.pop("payload_json") or "{}")
+        task["result"] = json.loads(task.pop("result_json") or "{}")
+        return task
+
+    def list_tasks(self, limit: int = 100) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, task_type, status, progress, message, payload_json, result_json, created_at, updated_at
+                FROM tasks
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        tasks: List[Dict[str, Any]] = []
+        for row in rows:
+            task = dict(row)
+            task["payload"] = json.loads(task.pop("payload_json") or "{}")
+            task["result"] = json.loads(task.pop("result_json") or "{}")
+            tasks.append(task)
+        return tasks

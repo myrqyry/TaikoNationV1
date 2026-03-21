@@ -50,6 +50,7 @@ model_configurations = []
 audio_features = []
 active_models: Dict[str, Dict[str, Any]] = {}
 store = StudioStore(CHART_OUTPUT_FOLDER / "studio.sqlite3")
+active_tasks = []
 
 
 def _load_persisted_state():
@@ -59,6 +60,7 @@ def _load_persisted_state():
     human_evaluations[:] = store.list_evaluations()
     model_configurations[:] = store.get_json("model_configurations", [])
     audio_features[:] = store.get_json("audio_features", [])
+    active_tasks[:] = store.list_tasks(limit=100)
 
 
 _load_persisted_state()
@@ -107,7 +109,8 @@ async def index():
 
 @app.get('/api/status')
 async def api_status():
-    return {'status': 'ready', 'models_loaded': len(active_models), 'training_active': False, 'generation_active': False}
+    generation_active = any(t.get('status') in {'queued', 'running'} for t in active_tasks if t.get('task_type') == 'generation')
+    return {'status': 'ready', 'models_loaded': len(active_models), 'training_active': False, 'generation_active': generation_active}
 
 
 @app.get('/api/dashboard')
@@ -156,10 +159,30 @@ async def api_generate_chart(
     _auth: bool = Depends(token_auth)
 ):
     await add_system_log('info', f'Chart generation started: {title}')
+    task = store.create_task(
+        task_type='generation',
+        payload={'title': title, 'artist': artist, 'difficulty': difficulty, 'bpm': bpm, 'genre': genre},
+        created_at=datetime.utcnow().isoformat(),
+    )
+    active_tasks.insert(0, task)
 
     async def simulate_generation():
+        store.update_task(
+            task['id'],
+            status='running',
+            progress=0,
+            message='Generation started',
+            updated_at=datetime.utcnow().isoformat(),
+        )
         for p in range(0, 101, 10):
-            await sio.emit('generation_progress', {'progress': p})
+            store.update_task(
+                task['id'],
+                status='running',
+                progress=p,
+                message='Generating chart',
+                updated_at=datetime.utcnow().isoformat(),
+            )
+            await sio.emit('generation_progress', {'task_id': task['id'], 'progress': p})
             await asyncio.sleep(0.5)
 
         chart = {
@@ -174,12 +197,35 @@ async def api_generate_chart(
         }
         stored_chart = store.create_chart(chart)
         generated_charts.insert(0, stored_chart)
+        store.update_task(
+            task['id'],
+            status='completed',
+            progress=100,
+            message='Generation completed',
+            result={'chart_id': stored_chart['id']},
+            updated_at=datetime.utcnow().isoformat(),
+        )
+        active_tasks[:] = store.list_tasks(limit=100)
         await sio.emit('chart_generated', {'chart': stored_chart})
         await add_system_log('success', f'Chart generated: {title}')
 
     # schedule background task
     asyncio.create_task(simulate_generation())
-    return {'success': True, 'message': 'Chart generation started'}
+    return {'success': True, 'message': 'Chart generation started', 'task_id': task['id']}
+
+
+@app.get('/api/tasks')
+async def api_tasks():
+    active_tasks[:] = store.list_tasks(limit=100)
+    return {'tasks': active_tasks}
+
+
+@app.get('/api/tasks/{task_id}')
+async def api_task(task_id: int):
+    task = store.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail='Task not found')
+    return task
 
 
 @app.get('/api/charts')
