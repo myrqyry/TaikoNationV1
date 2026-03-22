@@ -11,7 +11,7 @@ from taikonation.data.tokenization import TaikoTokenizer
 from taikonation.data.audio_processing import get_audio_features
 from taikonation.data.dataset import DIFFICULTY_MAP
 from taikonation.data.mediapipe_audio import MediaPipeAudioAnalyzer
-from web.helpers import atomic_write
+from taikonation.utils.file_utils import atomic_write
 
 class EnhancedChartGenerator:
     """

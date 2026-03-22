@@ -85,6 +85,18 @@ def test_normalize_export_tokens_balances_rolls():
     assert normalized == ["don", "roll_start", "ka", "roll_end"]
 
 
+def test_normalize_export_tokens_orphan_roll_end():
+    tokens = ["roll_end", "don", "ka"]
+    normalized = normalize_export_tokens(tokens)
+    assert normalized == ["don", "ka"]
+
+
+def test_normalize_export_tokens_unclosed_roll_start():
+    tokens = ["don", "roll_start", "ka"]
+    normalized = normalize_export_tokens(tokens)
+    assert normalized == ["don", "roll_start", "ka", "roll_end"]
+
+
 def test_validate_exported_osu_detects_non_monotonic_times():
     content = """osu file format v14
 [General]
@@ -101,3 +113,39 @@ SliderMultiplier:1.4
 """
     issues = validate_exported_osu(content)
     assert any("not monotonic" in issue for issue in issues)
+
+
+def test_validate_exported_osu_detects_malformed_token_streams():
+    content = """osu file format v14
+[General]
+Mode: 1
+[Metadata]
+Title:Test
+[Difficulty]
+SliderMultiplier:1.4
+[TimingPoints]
+0,500,4,2,1,70,1,0
+[HitObjects]
+256,192,1000
+256,192,1500,1,0,1:0:0:70:
+"""
+    issues = validate_exported_osu(content)
+    assert any("too few fields" in issue for issue in issues)
+
+
+def test_validate_exported_osu_unusual_bpm_offset(tmp_path: Path):
+    tokenizer = TaikoTokenizer()
+    token_ids = [tokenizer.vocab["don"]]
+    output = tmp_path / "chart_unusual.osu"
+
+    save_osu_chart(
+        token_ids,
+        tokenizer,
+        str(output),
+        audio_filename="song.wav",
+        bpm=999.0,
+        offset_ms=-5000,
+    )
+
+    content = output.read_text()
+    assert "-5000,60.060060" in content

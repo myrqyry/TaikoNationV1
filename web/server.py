@@ -98,7 +98,7 @@ def verify_installation():
 # Call verification before other imports
 verify_installation()
 
-from .helpers import error_response
+from web.helpers import error_response
 from functools import wraps
 from taikonation.data.tokenization import TaikoTokenizer
 from config_schema import ConfigSchema

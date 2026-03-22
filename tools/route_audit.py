@@ -12,11 +12,19 @@ FASTAPI_FILE = ROOT / "web" / "server_fastapi.py"
 OUT_FILE = ROOT / "docs" / "flask-migration-status.md"
 
 
+def normalize_flask_path(path: str) -> str:
+    """Convert Flask <type:param> or <param> to FastAPI {param} syntax."""
+    path = re.sub(r'<([^>:]+:)?([^>]+)>', r'{\2}', path)
+    # Special handling for static files paths
+    if path == '/static/{filename}':
+        path = '/static/{filename:path}'
+    return path
+
 def parse_flask_routes(text: str) -> set[tuple[str, str]]:
     routes: set[tuple[str, str]] = set()
     pattern = re.compile(r"@app\.route\(\s*['\"]([^'\"]+)['\"](?:,\s*methods\s*=\s*\[([^\]]+)\])?", re.MULTILINE)
     for match in pattern.finditer(text):
-        path = match.group(1)
+        path = normalize_flask_path(match.group(1))
         methods_part = match.group(2)
         if methods_part:
             methods = re.findall(r"['\"]([A-Z]+)['\"]", methods_part)
