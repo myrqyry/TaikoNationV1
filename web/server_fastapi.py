@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File
+from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Query
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -61,12 +61,12 @@ class UploadAudioResponse(BaseModel):
 
 
 class GenerateChartRequest(BaseModel):
-    title: str = "Untitled"
-    artist: str = "Unknown"
-    bpm: int = 120
-    genre: str = "electronic"
-    difficulty: str = "oni"
-    pattern_style: str = "balanced"
+    title: str = Field(default="Untitled", min_length=1, max_length=120)
+    artist: str = Field(default="Unknown", min_length=1, max_length=120)
+    bpm: int = Field(default=120, ge=40, le=320)
+    genre: str = Field(default="electronic", min_length=1, max_length=64)
+    difficulty: str = Field(default="oni", min_length=1, max_length=32)
+    pattern_style: str = Field(default="balanced", min_length=1, max_length=64)
 
 
 class PaginatedTasksResponse(BaseModel):
@@ -162,6 +162,7 @@ async def api_upload_audio(
     filename: Optional[str] = None,
     content: Optional[bytes] = None,
     file: Optional[UploadFile] = File(default=None),
+    _auth: bool = Depends(token_auth),
 ) -> UploadAudioResponse:
     # Preferred request style: multipart upload via `file`.
     if isinstance(file, UploadFile):
@@ -273,15 +274,17 @@ async def api_generate_chart(
 
 
 @app.get('/api/tasks')
-async def api_tasks(limit: int = 100, offset: int = 0) -> PaginatedTasksResponse:
-    limit = max(1, min(limit, 500))
-    offset = max(0, offset)
+async def api_tasks(
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    _auth: bool = Depends(token_auth),
+) -> PaginatedTasksResponse:
     active_tasks[:] = store.list_tasks(limit=limit, offset=offset)
     return PaginatedTasksResponse(tasks=active_tasks, total=store.count_tasks(), limit=limit, offset=offset)
 
 
 @app.get('/api/tasks/{task_id}')
-async def api_task(task_id: int):
+async def api_task(task_id: int, _auth: bool = Depends(token_auth)):
     task = store.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail='Task not found')
@@ -289,7 +292,7 @@ async def api_task(task_id: int):
 
 
 @app.post('/api/tasks/{task_id}/cancel')
-async def api_cancel_task(task_id: int):
+async def api_cancel_task(task_id: int, _auth: bool = Depends(token_auth)):
     task = store.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail='Task not found')
@@ -307,9 +310,11 @@ async def api_cancel_task(task_id: int):
 
 
 @app.get('/api/charts')
-async def api_charts(limit: int = 100, offset: int = 0) -> PaginatedChartsResponse:
-    limit = max(1, min(limit, 500))
-    offset = max(0, offset)
+async def api_charts(
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    _auth: bool = Depends(token_auth),
+) -> PaginatedChartsResponse:
     generated_charts[:] = store.list_charts(limit=limit, offset=offset)
     return PaginatedChartsResponse(charts=generated_charts, total=store.count_charts(), limit=limit, offset=offset)
 
