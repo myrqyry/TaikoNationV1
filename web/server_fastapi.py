@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import socketio
@@ -128,14 +128,25 @@ async def api_dashboard():
 
 
 @app.post('/api/upload-audio')
-async def api_upload_audio(filename: str, content: bytes):
-    if not filename:
+async def api_upload_audio(
+    filename: Optional[str] = None,
+    content: Optional[bytes] = None,
+    file: Optional[UploadFile] = File(default=None),
+):
+    # Preferred request style: multipart upload via `file`.
+    if isinstance(file, UploadFile):
+        filename = file.filename
+        content = await file.read()
+
+    if not filename or content is None:
         raise HTTPException(status_code=400, detail='No file provided')
 
     filename = Path(filename).name
     allowed = {'.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac'}
     if Path(filename).suffix.lower() not in allowed:
         raise HTTPException(status_code=400, detail='Unsupported file type')
+    if len(content) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail='File too large (max 50MB)')
 
     dest = UPLOAD_FOLDER / filename
     # Stream to disk

@@ -22,3 +22,8 @@ classifiers = [
 [project.urls]
 "Homepage" = "https://github.com/myrqyry/rhythm-tatsujin"
 "Issues" = "https://github.com/myrqyry/rhythm-tatsujin/issues"
+
+[project.scripts]
+taikonation-train = "taikonation.cli:train"
+taikonation-generate = "taikonation.cli:generate"
+taikonation-serve = "taikonation.cli:serve"

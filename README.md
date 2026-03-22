@@ -65,11 +65,11 @@ uvicorn server_fastapi:socket_app --host 127.0.0.1 --port 5000 --reload
 
 - **Train a model:**
   ```bash
-  python train_transformer.py --config config/default.yaml
+  python -m taikonation.training.trainer --config config/default.yaml
   ```
 - **Generate a chart:**
   ```bash
-  python generate_chart.py model.pth input_songs/song.npy output_chart.osu --difficulty oni
+  python -m taikonation.generation.generator model.pth input_songs/song.npy output_chart.osu --difficulty oni
   ```
 - **Batch processing:** See CLI docs and scripts.
 
