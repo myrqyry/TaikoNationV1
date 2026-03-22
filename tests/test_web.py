@@ -23,8 +23,8 @@ def test_audio_upload():
     content = b'RIFF....WAVEfmt '
     response = asyncio.run(web_server.api_upload_audio(filename='test_song.wav', content=content))
 
-    assert response['success'] is True
-    assert response['filename'] == 'test_song.wav'
+    assert response.success is True
+    assert response.filename == 'test_song.wav'
     assert any(log['message'].startswith('Audio uploaded:') for log in web_server.system_logs)
 
 
@@ -44,5 +44,21 @@ def test_cancel_task_endpoint():
 def test_audio_upload_with_multipart_file():
     upload = UploadFile(filename='multipart.wav', file=io.BytesIO(b'RIFF....WAVEfmt '))
     response = asyncio.run(web_server.api_upload_audio(file=upload))
-    assert response['success'] is True
-    assert response['filename'] == 'multipart.wav'
+    assert response.success is True
+    assert response.filename == 'multipart.wav'
+
+
+def test_tasks_endpoint_pagination_shape():
+    payload = asyncio.run(web_server.api_tasks(limit=5, offset=0))
+    assert payload.limit == 5
+    assert payload.offset == 0
+    assert isinstance(payload.total, int)
+    assert isinstance(payload.tasks, list)
+
+
+def test_charts_endpoint_pagination_shape():
+    payload = asyncio.run(web_server.api_charts(limit=3, offset=0))
+    assert payload.limit == 3
+    assert payload.offset == 0
+    assert isinstance(payload.total, int)
+    assert isinstance(payload.charts, list)

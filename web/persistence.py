@@ -92,11 +92,11 @@ class StudioStore:
                     (entry["timestamp"], entry["level"], entry["message"]),
                 )
 
-    def list_logs(self, limit: int = 200) -> List[Dict[str, Any]]:
+    def list_logs(self, limit: int = 200, offset: int = 0) -> List[Dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT timestamp, level, message FROM system_logs ORDER BY id DESC LIMIT ?",
-                (limit,),
+                "SELECT timestamp, level, message FROM system_logs ORDER BY id DESC LIMIT ? OFFSET ?",
+                (limit, offset),
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -124,12 +124,21 @@ class StudioStore:
         stored["id"] = chart_id
         return stored
 
-    def list_charts(self) -> List[Dict[str, Any]]:
+    def list_charts(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, title, artist, difficulty, bpm, genre, rating, plays, created_at FROM charts ORDER BY id DESC"
+                """
+                SELECT id, title, artist, difficulty, bpm, genre, rating, plays, created_at
+                FROM charts ORDER BY id DESC LIMIT ? OFFSET ?
+                """,
+                (limit, offset),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def count_charts(self) -> int:
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS count FROM charts").fetchone()
+        return int(row["count"]) if row else 0
 
     def get_unrated_chart(self) -> Optional[Dict[str, Any]]:
         with self._connect() as conn:
@@ -269,16 +278,16 @@ class StudioStore:
         task["result"] = json.loads(task.pop("result_json") or "{}")
         return task
 
-    def list_tasks(self, limit: int = 100) -> List[Dict[str, Any]]:
+    def list_tasks(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT id, task_type, status, progress, message, payload_json, result_json, created_at, updated_at
                 FROM tasks
                 ORDER BY id DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """,
-                (limit,),
+                (limit, offset),
             ).fetchall()
         tasks: List[Dict[str, Any]] = []
         for row in rows:
@@ -287,3 +296,8 @@ class StudioStore:
             task["result"] = json.loads(task.pop("result_json") or "{}")
             tasks.append(task)
         return tasks
+
+    def count_tasks(self) -> int:
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS count FROM tasks").fetchone()
+        return int(row["count"]) if row else 0

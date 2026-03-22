@@ -76,3 +76,29 @@ def test_store_task_lifecycle(tmp_path: Path):
     task_done = store.get_task(task["id"])
     assert task_done is not None
     assert task_done["result"]["chart_id"] == 7
+
+
+def test_store_pagination_and_counts(tmp_path: Path):
+    store = StudioStore(tmp_path / "studio.sqlite3")
+    for i in range(3):
+        store.create_chart(
+            {
+                "title": f"Song {i}",
+                "artist": "Artist",
+                "difficulty": "oni",
+                "bpm": 180,
+                "genre": "electronic",
+                "rating": 0,
+                "plays": 0,
+                "created_at": "2026-03-21T00:00:00",
+            }
+        )
+    assert store.count_charts() == 3
+    page = store.list_charts(limit=2, offset=1)
+    assert len(page) == 2
+
+    for i in range(4):
+        store.create_task(task_type="generation", payload={"i": i}, created_at="2026-03-21T00:00:00")
+    assert store.count_tasks() == 4
+    tasks_page = store.list_tasks(limit=2, offset=1)
+    assert len(tasks_page) == 2

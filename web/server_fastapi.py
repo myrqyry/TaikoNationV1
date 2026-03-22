@@ -12,11 +12,12 @@ import zipfile
 import asyncio
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 import socketio
 from web.persistence import StudioStore
 
@@ -51,6 +52,35 @@ audio_features = []
 active_models: Dict[str, Dict[str, Any]] = {}
 store = StudioStore(CHART_OUTPUT_FOLDER / "studio.sqlite3")
 active_tasks = []
+
+
+class UploadAudioResponse(BaseModel):
+    success: bool
+    filename: str
+    title: str
+
+
+class GenerateChartRequest(BaseModel):
+    title: str = "Untitled"
+    artist: str = "Unknown"
+    bpm: int = 120
+    genre: str = "electronic"
+    difficulty: str = "oni"
+    pattern_style: str = "balanced"
+
+
+class PaginatedTasksResponse(BaseModel):
+    tasks: List[Dict[str, Any]]
+    total: int
+    limit: int
+    offset: int
+
+
+class PaginatedChartsResponse(BaseModel):
+    charts: List[Dict[str, Any]]
+    total: int
+    limit: int
+    offset: int
 
 
 def _load_persisted_state():
@@ -132,7 +162,7 @@ async def api_upload_audio(
     filename: Optional[str] = None,
     content: Optional[bytes] = None,
     file: Optional[UploadFile] = File(default=None),
-):
+) -> UploadAudioResponse:
     # Preferred request style: multipart upload via `file`.
     if isinstance(file, UploadFile):
         filename = file.filename
@@ -156,19 +186,20 @@ async def api_upload_audio(
     # Minimal processing: return title
     title = filename.rsplit('.', 1)[0].replace('_', ' ').replace('-', ' ').title()
     await add_system_log('success', f'Audio uploaded: {filename}')
-    return {'success': True, 'filename': filename, 'title': title}
+    return UploadAudioResponse(success=True, filename=filename, title=title)
 
 
 @app.post('/api/generate-chart')
 async def api_generate_chart(
-    title: str = 'Untitled',
-    artist: str = 'Unknown',
-    bpm: int = 120,
-    genre: str = 'electronic',
-    difficulty: str = 'oni',
-    pattern_style: str = 'balanced',
+    request: GenerateChartRequest = GenerateChartRequest(),
     _auth: bool = Depends(token_auth)
 ):
+    title = request.title
+    artist = request.artist
+    bpm = request.bpm
+    genre = request.genre
+    difficulty = request.difficulty
+    pattern_style = request.pattern_style
     await add_system_log('info', f'Chart generation started: {title}')
     task = store.create_task(
         task_type='generation',
@@ -242,9 +273,11 @@ async def api_generate_chart(
 
 
 @app.get('/api/tasks')
-async def api_tasks():
-    active_tasks[:] = store.list_tasks(limit=100)
-    return {'tasks': active_tasks}
+async def api_tasks(limit: int = 100, offset: int = 0) -> PaginatedTasksResponse:
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    active_tasks[:] = store.list_tasks(limit=limit, offset=offset)
+    return PaginatedTasksResponse(tasks=active_tasks, total=store.count_tasks(), limit=limit, offset=offset)
 
 
 @app.get('/api/tasks/{task_id}')
@@ -274,9 +307,11 @@ async def api_cancel_task(task_id: int):
 
 
 @app.get('/api/charts')
-async def api_charts():
-    generated_charts[:] = store.list_charts()
-    return {'charts': generated_charts}
+async def api_charts(limit: int = 100, offset: int = 0) -> PaginatedChartsResponse:
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    generated_charts[:] = store.list_charts(limit=limit, offset=offset)
+    return PaginatedChartsResponse(charts=generated_charts, total=store.count_charts(), limit=limit, offset=offset)
 
 
 @app.get('/api/get-chart-for-evaluation')
