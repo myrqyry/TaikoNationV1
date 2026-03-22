@@ -219,7 +219,18 @@ def generate_chart(
 
     return generated_tokens
 
-def save_osu_chart(token_ids, tokenizer, output_path, audio_filename, title=None, artist=None, source="", tags=""):
+def save_osu_chart(
+    token_ids,
+    tokenizer,
+    output_path,
+    audio_filename,
+    title=None,
+    artist=None,
+    source="",
+    tags="",
+    bpm=120.0,
+    offset_ms=1000,
+):
     """Saves the generated tokens to a basic .osu file."""
     print(f"Saving chart to {output_path}...")
 
@@ -239,11 +250,18 @@ def save_osu_chart(token_ids, tokenizer, output_path, audio_filename, title=None
             if artist is None:
                 artist = "Unknown Artist"
 
+    beat_length = 60000.0 / max(float(bpm), 1.0)
+    slider_velocity_multiplier = -100.0
     osu_header = f"""osu file format v14
 [General]
 AudioFilename: {os.path.basename(audio_filename)}
 AudioLeadIn: 0
 Mode: 1
+[Events]
+//Background and Video events
+[TimingPoints]
+{offset_ms},{beat_length:.6f},4,2,1,70,1,0
+{offset_ms},{slider_velocity_multiplier:.6f},4,2,1,70,0,0
 [Metadata]
 Title:{title}
 Artist:{artist}
@@ -269,9 +287,10 @@ SliderTickRate:1
             f.write(osu_header)
 
             # Simple conversion of tokens to hit objects
-            # This assumes each token is a note at a fixed time interval.
-            time_interval = 200 # ms
-            current_time = 1000 # Start time
+            # Keep chart aligned to timing points via a fixed subdivision of beat length.
+            # 1/2 beat spacing approximates common taiko snap usage.
+            time_interval = max(int(round(beat_length / 2.0)), 1)
+            current_time = int(offset_ms)
 
             for token_name in token_names:
                 if token_name not in tokenizer.special_tokens and token_name != "[EMPTY]":
@@ -309,6 +328,8 @@ def main():
     parser.add_argument("--artist", default=None, help="Song artist for .osu metadata.")
     parser.add_argument("--source", default="", help="Source of the song for .osu metadata.")
     parser.add_argument("--tags", default="", help="Tags for .osu metadata.")
+    parser.add_argument("--bpm", type=float, default=120.0, help="Base BPM for exported timing points.")
+    parser.add_argument("--offset-ms", type=int, default=1000, help="First timing point offset in milliseconds.")
     parser.add_argument("--quantize", action="store_true", help="Apply INT8 dynamic quantization to the model (CPU only).")
 
     args = parser.parse_args()
@@ -365,7 +386,7 @@ def main():
     # --- Generate and Save ---
     generated_token_ids = generate_chart(model, audio_features, tokenizer, difficulty_id, config, device, temperature=args.temperature)
     save_osu_chart(generated_token_ids, tokenizer, args.output_path, args.audio_path,
-                   title=args.title, artist=args.artist, source=args.source, tags=args.tags)
+                   title=args.title, artist=args.artist, source=args.source, tags=args.tags, bpm=args.bpm, offset_ms=args.offset_ms)
 
 
 if __name__ == "__main__":

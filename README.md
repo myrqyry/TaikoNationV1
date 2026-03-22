@@ -69,7 +69,7 @@ uvicorn server_fastapi:socket_app --host 127.0.0.1 --port 5000 --reload
   ```
 - **Generate a chart:**
   ```bash
-  python -m taikonation.generation.generator model.pth input_songs/song.npy output_chart.osu --difficulty oni
+  python -m taikonation.generation.generator model.pth input_songs/song.npy output_chart.osu --difficulty oni --bpm 174 --offset-ms 1200
   ```
 - **Batch processing:** See CLI docs and scripts.
 
