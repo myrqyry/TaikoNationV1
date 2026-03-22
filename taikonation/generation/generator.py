@@ -284,6 +284,7 @@ SliderTickRate:1
 
     # Use the tokenizer to convert IDs back to human-readable token names
     token_names = tokenizer.detokenize(token_ids)
+    token_names = normalize_export_tokens(token_names)
 
     try:
         with atomic_write(output_path, "w") as f:
@@ -347,6 +348,36 @@ SliderTickRate:1
         print("Chart saved successfully.")
     except IOError as e:
         print(f"Error saving chart file: {e}")
+
+
+def normalize_export_tokens(token_names):
+    """Normalize token stream for safer `.osu` object emission.
+
+    - drops orphan `roll_end` tokens (no active roll to close)
+    - auto-appends `roll_end` if stream ends with an open roll
+    """
+    normalized = []
+    roll_depth = 0
+    for token in token_names:
+        if "roll_start" in token:
+            roll_depth += 1
+            normalized.append(token)
+            continue
+        if "roll_end" in token:
+            if roll_depth <= 0:
+                print("Warning: Dropping orphan roll_end token during export normalization.")
+                continue
+            roll_depth -= 1
+            normalized.append(token)
+            continue
+        normalized.append(token)
+
+    while roll_depth > 0:
+        normalized.append("roll_end")
+        roll_depth -= 1
+        print("Warning: Auto-appended roll_end token during export normalization.")
+
+    return normalized
 
 
 def main():

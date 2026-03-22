@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from taikonation.data.tokenization import TaikoTokenizer
-from taikonation.generation.generator import save_osu_chart
+from taikonation.generation.generator import save_osu_chart, normalize_export_tokens
 
 
 def test_save_osu_chart_writes_timing_points(tmp_path: Path):
@@ -77,3 +77,9 @@ def test_save_osu_chart_clamps_hitsound_volume(tmp_path: Path):
     )
     line = [l for l in output.read_text().splitlines() if l.startswith("256,192,")][0]
     assert line.endswith("1:0:0:100:")
+
+
+def test_normalize_export_tokens_balances_rolls():
+    tokens = ["don", "roll_end", "roll_start", "ka"]
+    normalized = normalize_export_tokens(tokens)
+    assert normalized == ["don", "roll_start", "ka", "roll_end"]
