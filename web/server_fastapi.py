@@ -10,6 +10,7 @@ import io
 import json
 import zipfile
 import asyncio
+import yaml
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -83,6 +84,10 @@ class PaginatedChartsResponse(BaseModel):
     offset: int
 
 
+class ConfigUpdateRequest(BaseModel):
+    config: Dict[str, Any]
+
+
 def _load_persisted_state():
     """Load persisted entities for compatibility with existing callers/tests."""
     system_logs[:] = store.list_logs(limit=200)
@@ -94,6 +99,29 @@ def _load_persisted_state():
 
 
 _load_persisted_state()
+
+
+def _config_path() -> Path:
+    return CONFIG_FOLDER / "default.yaml"
+
+
+def _load_runtime_config() -> Dict[str, Any]:
+    path = _config_path()
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def _deep_merge(base: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base)
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def require_token(token: Optional[str] = None):
@@ -155,6 +183,23 @@ async def api_dashboard():
         },
         'recent_logs': system_logs[:10]
     }
+
+
+@app.get('/api/config')
+async def api_get_config(_auth: bool = Depends(token_auth)):
+    return _load_runtime_config()
+
+
+@app.post('/api/config')
+async def api_update_config(payload: ConfigUpdateRequest, _auth: bool = Depends(token_auth)):
+    existing = _load_runtime_config()
+    merged = _deep_merge(existing, payload.config)
+    path = _config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(merged, f, sort_keys=False)
+    await add_system_log("success", "Configuration updated")
+    return {"success": True, "config": merged}
 
 
 @app.post('/api/upload-audio')

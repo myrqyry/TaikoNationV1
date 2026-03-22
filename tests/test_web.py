@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 import io
+from pathlib import Path
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if ROOT not in sys.path:
@@ -62,3 +63,24 @@ def test_charts_endpoint_pagination_shape():
     assert payload.offset == 0
     assert isinstance(payload.total, int)
     assert isinstance(payload.charts, list)
+
+
+def test_config_get_and_update(tmp_path: Path, monkeypatch):
+    cfg = tmp_path / "default.yaml"
+    cfg.write_text("model:\n  d_model: 128\ntraining:\n  batch_size: 8\n")
+    monkeypatch.setattr(web_server, "_config_path", lambda: cfg)
+
+    initial = asyncio.run(web_server.api_get_config())
+    assert initial["model"]["d_model"] == 128
+
+    updated = asyncio.run(
+        web_server.api_update_config(
+            web_server.ConfigUpdateRequest(config={"model": {"d_model": 256}})
+        )
+    )
+    assert updated["success"] is True
+    assert updated["config"]["model"]["d_model"] == 256
+
+    final = asyncio.run(web_server.api_get_config())
+    assert final["model"]["d_model"] == 256
+    assert final["training"]["batch_size"] == 8
