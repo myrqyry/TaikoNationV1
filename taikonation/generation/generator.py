@@ -252,6 +252,7 @@ def save_osu_chart(
 
     beat_length = 60000.0 / max(float(bpm), 1.0)
     slider_velocity_multiplier = -100.0
+    slider_multiplier = 1.4
     osu_header = f"""osu file format v14
 [General]
 AudioFilename: {os.path.basename(audio_filename)}
@@ -292,24 +293,51 @@ SliderTickRate:1
             time_interval = max(int(round(beat_length / 2.0)), 1)
             current_time = int(offset_ms)
 
+            roll_active = False
+            roll_start_time = current_time
+
             for token_name in token_names:
-                if token_name not in tokenizer.special_tokens and token_name != "[EMPTY]":
-                    # x,y,time,type,hitSound,objectParams,hitSample
-                    # For Taiko, x is always 256, y is always 192.
-                    # type is a bitfield; 1 means it's a circle. All our notes are circles.
-                    note_type = 1
-
-                    # hitSound is a bitfield: 0=normal, 2=whistle, 4=finish, 8=clap.
-                    # 'ka' is represented by the 'clap' hitSound.
-                    # 'big' notes are represented by the 'finish' hitSound.
-                    hit_sound = 0
-                    if "ka" in token_name:
-                        hit_sound |= 8  # Clap for ka
-                    if "big" in token_name:
-                        hit_sound |= 4  # Finish for big notes
-
-                    f.write(f"256,192,{current_time},{note_type},{hit_sound},0:0:0:0:\n")
+                if token_name in tokenizer.special_tokens or token_name == "[EMPTY]":
                     current_time += time_interval
+                    continue
+
+                if "roll_start" in token_name:
+                    roll_active = True
+                    roll_start_time = current_time
+                    current_time += time_interval
+                    continue
+
+                if "roll_end" in token_name and roll_active:
+                    roll_duration = max(current_time - roll_start_time, time_interval)
+                    # slider length formula approximation:
+                    # duration_ms ≈ (pixel_length * beat_length) / (slider_multiplier * 100)
+                    slider_length = max((roll_duration * slider_multiplier * 100.0) / beat_length, 1.0)
+                    f.write(
+                        f"256,192,{roll_start_time},2,0,B|256:192,1,{slider_length:.2f},0|0,0:0|0:0,0:0:0:0:\n"
+                    )
+                    roll_active = False
+                    current_time += time_interval
+                    continue
+
+                if "finisher" in token_name:
+                    spinner_end = current_time + max(time_interval * 2, 1)
+                    f.write(f"256,192,{current_time},8,0,{spinner_end},0:0:0:0:\n")
+                    current_time += time_interval
+                    continue
+
+                # x,y,time,type,hitSound,objectParams,hitSample
+                # For Taiko, x is always 256, y is always 192.
+                note_type = 1
+
+                # hitSound is a bitfield: 0=normal, 2=whistle, 4=finish, 8=clap.
+                hit_sound = 0
+                if "ka" in token_name:
+                    hit_sound |= 8  # Clap for ka
+                if "big" in token_name:
+                    hit_sound |= 4  # Finish for big notes
+
+                f.write(f"256,192,{current_time},{note_type},{hit_sound},0:0:0:0:\n")
+                current_time += time_interval
         print("Chart saved successfully.")
     except IOError as e:
         print(f"Error saving chart file: {e}")
