@@ -20,7 +20,16 @@ async def _response_bytes(response):
 
 
 def test_export_dataset_returns_zip():
-    web_server.generated_charts[:] = [{'id': 1, 'title': 'Sample', 'rating': 0}]
+    web_server.store.create_chart({
+        'title': 'Sample',
+        'artist': 'Artist',
+        'difficulty': 'oni',
+        'bpm': 180,
+        'genre': 'electronic',
+        'rating': 0,
+        'plays': 0,
+        'created_at': '2026-03-21T00:00:00',
+    })
 
     resp = asyncio.run(web_server.api_research_export_dataset())
     assert resp.media_type == 'application/zip'
@@ -31,4 +40,5 @@ def test_export_dataset_returns_zip():
     z = zipfile.ZipFile(io.BytesIO(data))
     assert 'dataset.json' in z.namelist()
     content = json.loads(z.read('dataset.json').decode('utf-8'))
+    assert len(content['generated_charts']) > 0
     assert content['generated_charts'][0]['title'] == 'Sample'

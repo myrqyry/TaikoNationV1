@@ -1,0 +1,24 @@
+name: Route Audit
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  audit-routes:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run Route Audit Script
+        run: |
+          python tools/route_audit.py
+      - name: Check for Uncommitted Changes
+        run: |
+          git diff --exit-code docs/flask-migration-status.md || (echo "The route audit documentation is out of date. Please run 'python tools/route_audit.py' locally and commit the resulting changes in docs/." && exit 1)

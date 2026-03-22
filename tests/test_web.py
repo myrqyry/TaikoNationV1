@@ -41,6 +41,31 @@ def test_cancel_task_endpoint():
     assert task_after is not None
     assert task_after['status'] == 'cancelled'
 
+def test_api_tasks_persistence():
+    # Insert multiple tasks
+    for i in range(5):
+        web_server.store.create_task(
+            task_type='training',
+            payload={'run': i},
+            created_at='2026-03-21T00:00:00'
+        )
+
+    # Retrieve paginated tasks
+    tasks_page = asyncio.run(web_server.api_tasks(limit=3, offset=0))
+    assert len(tasks_page.tasks) == 3
+    assert tasks_page.total >= 5
+
+    # Ensure they reflect state from the DB, not just in-memory dicts
+    task_id = tasks_page.tasks[0]['id']
+    single_task = asyncio.run(web_server.api_task(task_id))
+    assert single_task['id'] == task_id
+    assert single_task['task_type'] == 'training'
+
+    # Ensure task endpoints actually query the persistent store correctly
+    # Check that pagination works
+    next_page = asyncio.run(web_server.api_tasks(limit=3, offset=3))
+    assert len(next_page.tasks) >= 2
+
 
 def test_audio_upload_with_multipart_file():
     upload = UploadFile(filename='multipart.wav', file=io.BytesIO(b'RIFF....WAVEfmt '))
