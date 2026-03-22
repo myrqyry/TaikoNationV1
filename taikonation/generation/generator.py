@@ -219,7 +219,19 @@ def generate_chart(
 
     return generated_tokens
 
-def save_osu_chart(token_ids, tokenizer, output_path, audio_filename, title=None, artist=None, source="", tags=""):
+def save_osu_chart(
+    token_ids,
+    tokenizer,
+    output_path,
+    audio_filename,
+    title=None,
+    artist=None,
+    source="",
+    tags="",
+    bpm=120.0,
+    offset_ms=1000,
+    hitsound_volume=70,
+):
     """Saves the generated tokens to a basic .osu file."""
     print(f"Saving chart to {output_path}...")
 
@@ -239,11 +251,20 @@ def save_osu_chart(token_ids, tokenizer, output_path, audio_filename, title=None
             if artist is None:
                 artist = "Unknown Artist"
 
+    beat_length = 60000.0 / max(float(bpm), 1.0)
+    slider_velocity_multiplier = -100.0
+    slider_multiplier = 1.4
+    hitsound_volume = max(0, min(int(hitsound_volume), 100))
     osu_header = f"""osu file format v14
 [General]
 AudioFilename: {os.path.basename(audio_filename)}
 AudioLeadIn: 0
 Mode: 1
+[Events]
+//Background and Video events
+[TimingPoints]
+{offset_ms},{beat_length:.6f},4,2,1,70,1,0
+{offset_ms},{slider_velocity_multiplier:.6f},4,2,1,70,0,0
 [Metadata]
 Title:{title}
 Artist:{artist}
@@ -263,37 +284,149 @@ SliderTickRate:1
 
     # Use the tokenizer to convert IDs back to human-readable token names
     token_names = tokenizer.detokenize(token_ids)
+    token_names = normalize_export_tokens(token_names)
 
     try:
         with atomic_write(output_path, "w") as f:
-            f.write(osu_header)
+            hitobject_lines = []
 
             # Simple conversion of tokens to hit objects
-            # This assumes each token is a note at a fixed time interval.
-            time_interval = 200 # ms
-            current_time = 1000 # Start time
+            # Keep chart aligned to timing points via a fixed subdivision of beat length.
+            # 1/2 beat spacing approximates common taiko snap usage.
+            time_interval = max(int(round(beat_length / 2.0)), 1)
+            current_time = int(offset_ms)
+
+            roll_active = False
+            roll_start_time = current_time
 
             for token_name in token_names:
-                if token_name not in tokenizer.special_tokens and token_name != "[EMPTY]":
-                    # x,y,time,type,hitSound,objectParams,hitSample
-                    # For Taiko, x is always 256, y is always 192.
-                    # type is a bitfield; 1 means it's a circle. All our notes are circles.
-                    note_type = 1
-
-                    # hitSound is a bitfield: 0=normal, 2=whistle, 4=finish, 8=clap.
-                    # 'ka' is represented by the 'clap' hitSound.
-                    # 'big' notes are represented by the 'finish' hitSound.
-                    hit_sound = 0
-                    if "ka" in token_name:
-                        hit_sound |= 8  # Clap for ka
-                    if "big" in token_name:
-                        hit_sound |= 4  # Finish for big notes
-
-                    f.write(f"256,192,{current_time},{note_type},{hit_sound},0:0:0:0:\n")
+                if token_name in tokenizer.special_tokens or token_name == "[EMPTY]":
                     current_time += time_interval
+                    continue
+
+                if "roll_start" in token_name:
+                    roll_active = True
+                    roll_start_time = current_time
+                    current_time += time_interval
+                    continue
+
+                if "roll_end" in token_name and roll_active:
+                    roll_duration = max(current_time - roll_start_time, time_interval)
+                    # slider length formula approximation:
+                    # duration_ms ≈ (pixel_length * beat_length) / (slider_multiplier * 100)
+                    slider_length = max((roll_duration * slider_multiplier * 100.0) / beat_length, 1.0)
+                    hit_sample = f"1:0:0:{hitsound_volume}:"
+                    hitobject_lines.append(
+                        f"256,192,{roll_start_time},2,0,B|256:192,1,{slider_length:.2f},0|0,0:0|0:0,{hit_sample}\n"
+                    )
+                    roll_active = False
+                    current_time += time_interval
+                    continue
+
+                if "finisher" in token_name:
+                    spinner_end = current_time + max(time_interval * 2, 1)
+                    hit_sample = f"1:0:0:{hitsound_volume}:"
+                    hitobject_lines.append(f"256,192,{current_time},8,0,{spinner_end},{hit_sample}\n")
+                    current_time += time_interval
+                    continue
+
+                # x,y,time,type,hitSound,objectParams,hitSample
+                # For Taiko, x is always 256, y is always 192.
+                note_type = 1
+
+                # hitSound is a bitfield: 0=normal, 2=whistle, 4=finish, 8=clap.
+                hit_sound = 0
+                if "ka" in token_name:
+                    hit_sound |= 8  # Clap for ka
+                if "big" in token_name:
+                    hit_sound |= 4  # Finish for big notes
+                addition_set = 2 if "ka" in token_name else 0
+                hit_sample = f"1:{addition_set}:0:{hitsound_volume}:"
+
+                hitobject_lines.append(f"256,192,{current_time},{note_type},{hit_sound},{hit_sample}\n")
+                current_time += time_interval
+            content = osu_header + "".join(hitobject_lines)
+            export_issues = validate_exported_osu(content)
+            for issue in export_issues:
+                print(f"Warning: export validation - {issue}")
+            f.write(content)
         print("Chart saved successfully.")
     except IOError as e:
         print(f"Error saving chart file: {e}")
+
+
+def normalize_export_tokens(token_names):
+    """Normalize token stream for safer `.osu` object emission.
+
+    - drops orphan `roll_end` tokens (no active roll to close)
+    - auto-appends `roll_end` if stream ends with an open roll
+    """
+    normalized = []
+    roll_depth = 0
+    for token in token_names:
+        if "roll_start" in token:
+            roll_depth += 1
+            normalized.append(token)
+            continue
+        if "roll_end" in token:
+            if roll_depth <= 0:
+                print("Warning: Dropping orphan roll_end token during export normalization.")
+                continue
+            roll_depth -= 1
+            normalized.append(token)
+            continue
+        normalized.append(token)
+
+    while roll_depth > 0:
+        normalized.append("roll_end")
+        roll_depth -= 1
+        print("Warning: Auto-appended roll_end token during export normalization.")
+
+    return normalized
+
+
+def validate_exported_osu(content):
+    """Validate structural constraints in exported `.osu` content."""
+    issues = []
+    required_sections = ["[General]", "[Metadata]", "[Difficulty]", "[TimingPoints]", "[HitObjects]"]
+    for section in required_sections:
+        if section not in content:
+            issues.append(f"missing section: {section}")
+
+    lines = content.splitlines()
+    hitobject_start = None
+    for idx, line in enumerate(lines):
+        if line.strip() == "[HitObjects]":
+            hitobject_start = idx + 1
+            break
+    if hitobject_start is None:
+        return issues
+
+    hit_lines = [line for line in lines[hitobject_start:] if line.strip()]
+    prev_time = -1
+    for i, line in enumerate(hit_lines):
+        parts = line.split(",")
+        if len(parts) < 6:
+            issues.append(f"hitobject line {i+1} has too few fields")
+            continue
+        try:
+            t = int(parts[2])
+        except ValueError:
+            issues.append(f"hitobject line {i+1} has non-integer time")
+            continue
+        if t < prev_time:
+            issues.append(f"hitobject line {i+1} time is not monotonic")
+        prev_time = t
+
+        try:
+            obj_type = int(parts[3])
+        except ValueError:
+            issues.append(f"hitobject line {i+1} has invalid type")
+            continue
+        if obj_type & 2 and len(parts) < 8:
+            issues.append(f"slider line {i+1} missing slider fields")
+
+    return issues
 
 
 def main():
@@ -309,6 +442,9 @@ def main():
     parser.add_argument("--artist", default=None, help="Song artist for .osu metadata.")
     parser.add_argument("--source", default="", help="Source of the song for .osu metadata.")
     parser.add_argument("--tags", default="", help="Tags for .osu metadata.")
+    parser.add_argument("--bpm", type=float, default=120.0, help="Base BPM for exported timing points.")
+    parser.add_argument("--offset-ms", type=int, default=1000, help="First timing point offset in milliseconds.")
+    parser.add_argument("--hitsound-volume", type=int, default=70, help="Per-object hitSample volume (0-100).")
     parser.add_argument("--quantize", action="store_true", help="Apply INT8 dynamic quantization to the model (CPU only).")
 
     args = parser.parse_args()
@@ -365,7 +501,7 @@ def main():
     # --- Generate and Save ---
     generated_token_ids = generate_chart(model, audio_features, tokenizer, difficulty_id, config, device, temperature=args.temperature)
     save_osu_chart(generated_token_ids, tokenizer, args.output_path, args.audio_path,
-                   title=args.title, artist=args.artist, source=args.source, tags=args.tags)
+                   title=args.title, artist=args.artist, source=args.source, tags=args.tags, bpm=args.bpm, offset_ms=args.offset_ms, hitsound_volume=args.hitsound_volume)
 
 
 if __name__ == "__main__":

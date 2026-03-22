@@ -27,11 +27,11 @@ rhythm-tatsujin is the modern successor to the influential research of ["TaikoNa
 
 ***
 
-## Installation (Rapidly changing so probably OOD)
+## Installation
 
 ### Prerequisites
 
-- Python 3.8+
+- Python 3.10+
 - PyTorch 1.12+
 - NumPy, SciPy, librosa, FastAPI
 - (Optional: ffmpeg, TensorFlow, CUDA for max speed)
@@ -39,8 +39,8 @@ rhythm-tatsujin is the modern successor to the influential research of ["TaikoNa
 ### Project Setup
 
 ```bash
-git clone https://github.com/myrqyry/TaikoNationV1.git
-cd TaikoNationV1
+git clone https://github.com/myrqyry/rhythm-tatsujin.git
+cd rhythm-tatsujin
 pip install -r requirements.txt
 # Optionally: pip install -r web/requirements.txt  # for web interface
 ```
@@ -65,11 +65,11 @@ uvicorn server_fastapi:socket_app --host 127.0.0.1 --port 5000 --reload
 
 - **Train a model:**
   ```bash
-  python train_transformer.py --config config/default.yaml
+  python -m taikonation.training.trainer --config config/default.yaml
   ```
 - **Generate a chart:**
   ```bash
-  python generate_chart.py model.pth input_songs/song.npy output_chart.osu --difficulty oni
+  python -m taikonation.generation.generator model.pth input_songs/song.npy output_chart.osu --difficulty oni --bpm 174 --offset-ms 1200 --hitsound-volume 75
   ```
 - **Batch processing:** See CLI docs and scripts.
 

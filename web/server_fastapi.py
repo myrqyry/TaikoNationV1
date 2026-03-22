@@ -10,14 +10,17 @@ import io
 import json
 import zipfile
 import asyncio
+import yaml
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Query
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 import socketio
+from web.persistence import StudioStore
 
 # Project paths
 BASE_DIR = Path(__file__).resolve().parent
@@ -48,6 +51,77 @@ human_evaluations = []
 model_configurations = []
 audio_features = []
 active_models: Dict[str, Dict[str, Any]] = {}
+store = StudioStore(CHART_OUTPUT_FOLDER / "studio.sqlite3")
+active_tasks = []
+
+
+class UploadAudioResponse(BaseModel):
+    success: bool
+    filename: str
+    title: str
+
+
+class GenerateChartRequest(BaseModel):
+    title: str = Field(default="Untitled", min_length=1, max_length=120)
+    artist: str = Field(default="Unknown", min_length=1, max_length=120)
+    bpm: int = Field(default=120, ge=40, le=320)
+    genre: str = Field(default="electronic", min_length=1, max_length=64)
+    difficulty: str = Field(default="oni", min_length=1, max_length=32)
+    pattern_style: str = Field(default="balanced", min_length=1, max_length=64)
+
+
+class PaginatedTasksResponse(BaseModel):
+    tasks: List[Dict[str, Any]]
+    total: int
+    limit: int
+    offset: int
+
+
+class PaginatedChartsResponse(BaseModel):
+    charts: List[Dict[str, Any]]
+    total: int
+    limit: int
+    offset: int
+
+
+class ConfigUpdateRequest(BaseModel):
+    config: Dict[str, Any]
+
+
+def _load_persisted_state():
+    """Load persisted entities for compatibility with existing callers/tests."""
+    system_logs[:] = store.list_logs(limit=200)
+    generated_charts[:] = store.list_charts()
+    human_evaluations[:] = store.list_evaluations()
+    model_configurations[:] = store.get_json("model_configurations", [])
+    audio_features[:] = store.get_json("audio_features", [])
+    active_tasks[:] = store.list_tasks(limit=100)
+
+
+_load_persisted_state()
+
+
+def _config_path() -> Path:
+    return CONFIG_FOLDER / "default.yaml"
+
+
+def _load_runtime_config() -> Dict[str, Any]:
+    path = _config_path()
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def _deep_merge(base: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base)
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def require_token(token: Optional[str] = None):
@@ -69,6 +143,7 @@ async def add_system_log(level: str, message: str):
     system_logs.insert(0, entry)
     # Keep last 200
     del system_logs[200:]
+    store.append_log(entry)
     await sio.emit('system_log', entry)
 
 
@@ -92,7 +167,8 @@ async def index():
 
 @app.get('/api/status')
 async def api_status():
-    return {'status': 'ready', 'models_loaded': len(active_models), 'training_active': False, 'generation_active': False}
+    generation_active = any(t.get('status') in {'queued', 'running'} for t in active_tasks if t.get('task_type') == 'generation')
+    return {'status': 'ready', 'models_loaded': len(active_models), 'training_active': False, 'generation_active': generation_active}
 
 
 @app.get('/api/dashboard')
@@ -109,15 +185,44 @@ async def api_dashboard():
     }
 
 
+@app.get('/api/config')
+async def api_get_config(_auth: bool = Depends(token_auth)):
+    return _load_runtime_config()
+
+
+@app.post('/api/config')
+async def api_update_config(payload: ConfigUpdateRequest, _auth: bool = Depends(token_auth)):
+    existing = _load_runtime_config()
+    merged = _deep_merge(existing, payload.config)
+    path = _config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(merged, f, sort_keys=False)
+    await add_system_log("success", "Configuration updated")
+    return {"success": True, "config": merged}
+
+
 @app.post('/api/upload-audio')
-async def api_upload_audio(filename: str, content: bytes):
-    if not filename:
+async def api_upload_audio(
+    filename: Optional[str] = None,
+    content: Optional[bytes] = None,
+    file: Optional[UploadFile] = File(default=None),
+    _auth: bool = Depends(token_auth),
+) -> UploadAudioResponse:
+    # Preferred request style: multipart upload via `file`.
+    if isinstance(file, UploadFile):
+        filename = file.filename
+        content = await file.read()
+
+    if not filename or content is None:
         raise HTTPException(status_code=400, detail='No file provided')
 
     filename = Path(filename).name
     allowed = {'.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac'}
     if Path(filename).suffix.lower() not in allowed:
         raise HTTPException(status_code=400, detail='Unsupported file type')
+    if len(content) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail='File too large (max 50MB)')
 
     dest = UPLOAD_FOLDER / filename
     # Stream to disk
@@ -127,70 +232,163 @@ async def api_upload_audio(filename: str, content: bytes):
     # Minimal processing: return title
     title = filename.rsplit('.', 1)[0].replace('_', ' ').replace('-', ' ').title()
     await add_system_log('success', f'Audio uploaded: {filename}')
-    return {'success': True, 'filename': filename, 'title': title}
+    return UploadAudioResponse(success=True, filename=filename, title=title)
 
 
 @app.post('/api/generate-chart')
 async def api_generate_chart(
-    title: str = 'Untitled',
-    artist: str = 'Unknown',
-    bpm: int = 120,
-    genre: str = 'electronic',
-    difficulty: str = 'oni',
-    pattern_style: str = 'balanced',
+    request: GenerateChartRequest = GenerateChartRequest(),
     _auth: bool = Depends(token_auth)
 ):
+    title = request.title
+    artist = request.artist
+    bpm = request.bpm
+    genre = request.genre
+    difficulty = request.difficulty
+    pattern_style = request.pattern_style
     await add_system_log('info', f'Chart generation started: {title}')
+    task = store.create_task(
+        task_type='generation',
+        payload={'title': title, 'artist': artist, 'difficulty': difficulty, 'bpm': bpm, 'genre': genre},
+        created_at=datetime.utcnow().isoformat(),
+    )
+    active_tasks.insert(0, task)
 
     async def simulate_generation():
-        for p in range(0, 101, 10):
-            await sio.emit('generation_progress', {'progress': p})
-            await asyncio.sleep(0.5)
+        try:
+            store.update_task(
+                task['id'],
+                status='running',
+                progress=0,
+                message='Generation started',
+                updated_at=datetime.utcnow().isoformat(),
+            )
+            for p in range(0, 101, 10):
+                current_task = store.get_task(task['id']) or {}
+                if current_task.get('status') == 'cancelled':
+                    await add_system_log('warning', f'Chart generation cancelled: task {task["id"]}')
+                    active_tasks[:] = store.list_tasks(limit=100)
+                    return
 
-        chart = {
-            'id': len(generated_charts) + 1,
-            'title': title,
-            'artist': artist,
-            'difficulty': difficulty,
-            'bpm': bpm,
-            'genre': genre,
-            'rating': 0,
-            'plays': 0,
-            'created_at': datetime.utcnow().isoformat()
-        }
-        generated_charts.append(chart)
-        await sio.emit('chart_generated', {'chart': chart})
-        await add_system_log('success', f'Chart generated: {title}')
+                store.update_task(
+                    task['id'],
+                    status='running',
+                    progress=p,
+                    message='Generating chart',
+                    updated_at=datetime.utcnow().isoformat(),
+                )
+                await sio.emit('generation_progress', {'task_id': task['id'], 'progress': p})
+                await asyncio.sleep(0.5)
+
+            chart = {
+                'title': title,
+                'artist': artist,
+                'difficulty': difficulty,
+                'bpm': bpm,
+                'genre': genre,
+                'rating': 0,
+                'plays': 0,
+                'created_at': datetime.utcnow().isoformat()
+            }
+            stored_chart = store.create_chart(chart)
+            generated_charts.insert(0, stored_chart)
+            store.update_task(
+                task['id'],
+                status='completed',
+                progress=100,
+                message='Generation completed',
+                result={'chart_id': stored_chart['id']},
+                updated_at=datetime.utcnow().isoformat(),
+            )
+            active_tasks[:] = store.list_tasks(limit=100)
+            await sio.emit('chart_generated', {'chart': stored_chart})
+            await add_system_log('success', f'Chart generated: {title}')
+        except Exception as exc:
+            store.update_task(
+                task['id'],
+                status='failed',
+                message=str(exc),
+                updated_at=datetime.utcnow().isoformat(),
+            )
+            active_tasks[:] = store.list_tasks(limit=100)
+            await add_system_log('error', f'Chart generation failed: task {task["id"]}')
 
     # schedule background task
     asyncio.create_task(simulate_generation())
-    return {'success': True, 'message': 'Chart generation started'}
+    return {'success': True, 'message': 'Chart generation started', 'task_id': task['id']}
+
+
+@app.get('/api/tasks')
+async def api_tasks(
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    _auth: bool = Depends(token_auth),
+) -> PaginatedTasksResponse:
+    active_tasks[:] = store.list_tasks(limit=limit, offset=offset)
+    return PaginatedTasksResponse(tasks=active_tasks, total=store.count_tasks(), limit=limit, offset=offset)
+
+
+@app.get('/api/tasks/{task_id}')
+async def api_task(task_id: int, _auth: bool = Depends(token_auth)):
+    task = store.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail='Task not found')
+    return task
+
+
+@app.post('/api/tasks/{task_id}/cancel')
+async def api_cancel_task(task_id: int, _auth: bool = Depends(token_auth)):
+    task = store.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail='Task not found')
+    if task.get('status') in {'completed', 'failed', 'cancelled'}:
+        return {'success': False, 'message': f"Task already {task.get('status')}"}
+    store.update_task(
+        task_id,
+        status='cancelled',
+        message='Cancelled by user',
+        updated_at=datetime.utcnow().isoformat(),
+    )
+    active_tasks[:] = store.list_tasks(limit=100)
+    await add_system_log('warning', f'Task cancelled: {task_id}')
+    return {'success': True, 'task_id': task_id, 'status': 'cancelled'}
 
 
 @app.get('/api/charts')
-async def api_charts():
-    return {'charts': generated_charts}
+async def api_charts(
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    _auth: bool = Depends(token_auth),
+) -> PaginatedChartsResponse:
+    generated_charts[:] = store.list_charts(limit=limit, offset=offset)
+    return PaginatedChartsResponse(charts=generated_charts, total=store.count_charts(), limit=limit, offset=offset)
 
 
 @app.get('/api/get-chart-for-evaluation')
 async def api_get_chart_for_evaluation():
-    if generated_charts:
-        # return first unrated chart
-        for c in generated_charts:
-            if c.get('rating', 0) == 0:
-                return c
+    chart = store.get_unrated_chart()
+    if chart:
+        return chart
     raise HTTPException(status_code=404, detail='No charts available for evaluation')
 
 
 @app.post('/api/submit-evaluation')
 async def api_submit_evaluation(chart_id: int, fun: int, musicality: int, playability: int, coherence: int, comments: str = ''):
-    for chart in generated_charts:
-        if chart['id'] == chart_id:
-            ratings = [fun, musicality, playability, coherence]
-            chart['rating'] = sum(ratings) / len(ratings)
-            await add_system_log('success', f'Evaluation submitted for chart {chart_id}')
-            return {'success': True}
-    raise HTTPException(status_code=404, detail='Chart not found')
+    ok = store.submit_evaluation(
+        chart_id=chart_id,
+        fun=fun,
+        musicality=musicality,
+        playability=playability,
+        coherence=coherence,
+        comments=comments,
+        created_at=datetime.utcnow().isoformat(),
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail='Chart not found')
+    generated_charts[:] = store.list_charts()
+    human_evaluations[:] = store.list_evaluations()
+    await add_system_log('success', f'Evaluation submitted for chart {chart_id}')
+    return {'success': True}
 
 
 
@@ -198,6 +396,10 @@ async def api_submit_evaluation(chart_id: int, fun: int, musicality: int, playab
 @app.get('/api/research/export-dataset')
 async def api_research_export_dataset():
     """Export the current in-memory research dataset as a zip archive."""
+    generated_charts[:] = store.list_charts()
+    human_evaluations[:] = store.list_evaluations()
+    model_configurations[:] = store.get_json("model_configurations", model_configurations)
+    audio_features[:] = store.get_json("audio_features", audio_features)
     export_payload = {
         'generated_charts': generated_charts,
         'human_evaluations': human_evaluations,
