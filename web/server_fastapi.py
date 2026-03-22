@@ -635,6 +635,8 @@ async def api_save_chart(request: SaveChartRequest, _auth: bool = Depends(token_
         await add_system_log('success', f"Chart '{chart.get('title', 'Unknown')}' updated from editor.")
         return {'success': True, 'message': 'Chart saved successfully.'}
     except Exception as e:
+        # Assuming `logger` is a configured logging instance at the module level
+        logger.error(f"Failed to save chart file {filepath}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail='Failed to save chart file')
 
 
