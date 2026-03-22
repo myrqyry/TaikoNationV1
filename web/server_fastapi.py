@@ -505,7 +505,9 @@ async def api_chart_data(id: int = Query(...)):
                             else:
                                 continue
                             notes.append(note)
-        except Exception:
+        except Exception as e:
+            # Assuming `logger` is a configured logging instance at the module level
+            logger.error(f"Failed to parse .osu file {filepath}: {e}", exc_info=True)
             return None
         return notes
 
