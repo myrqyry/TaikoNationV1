@@ -67,7 +67,7 @@ The taiko ecosystem has known conversion behaviors involving short sliders, low 
 2. 🟡 **Add drumroll/denden token support** and proper object writing in exporter (now partially implemented; needs gameplay validation/tuning).
 3. 🟡 **Add `hitSample` modeling** (volume/sampleset/index controls) and configurable taiko sample profiles (basic volume/set routing now present; profile-level control still pending).
 4. **Add section annotations (kiai + SV lanes)** from model outputs or post-processing heuristics.
-5. 🟡 **Add validation against osu! file-format constraints** before export (token-stream normalization started; full parser-level validation pending).
+5. 🟡 **Add validation against osu! file-format constraints** before export (token normalization + structural checks now present; strict parser-level validation still pending).
 
 ## Suggested acceptance checks
 

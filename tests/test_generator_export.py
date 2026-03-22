@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from taikonation.data.tokenization import TaikoTokenizer
-from taikonation.generation.generator import save_osu_chart, normalize_export_tokens
+from taikonation.generation.generator import save_osu_chart, normalize_export_tokens, validate_exported_osu
 
 
 def test_save_osu_chart_writes_timing_points(tmp_path: Path):
@@ -83,3 +83,21 @@ def test_normalize_export_tokens_balances_rolls():
     tokens = ["don", "roll_end", "roll_start", "ka"]
     normalized = normalize_export_tokens(tokens)
     assert normalized == ["don", "roll_start", "ka", "roll_end"]
+
+
+def test_validate_exported_osu_detects_non_monotonic_times():
+    content = """osu file format v14
+[General]
+Mode: 1
+[Metadata]
+Title:Test
+[Difficulty]
+SliderMultiplier:1.4
+[TimingPoints]
+0,500,4,2,1,70,1,0
+[HitObjects]
+256,192,1000,1,0,1:0:0:70:
+256,192,900,1,0,1:0:0:70:
+"""
+    issues = validate_exported_osu(content)
+    assert any("not monotonic" in issue for issue in issues)

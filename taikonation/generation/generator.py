@@ -288,7 +288,7 @@ SliderTickRate:1
 
     try:
         with atomic_write(output_path, "w") as f:
-            f.write(osu_header)
+            hitobject_lines = []
 
             # Simple conversion of tokens to hit objects
             # Keep chart aligned to timing points via a fixed subdivision of beat length.
@@ -316,7 +316,7 @@ SliderTickRate:1
                     # duration_ms ≈ (pixel_length * beat_length) / (slider_multiplier * 100)
                     slider_length = max((roll_duration * slider_multiplier * 100.0) / beat_length, 1.0)
                     hit_sample = f"1:0:0:{hitsound_volume}:"
-                    f.write(
+                    hitobject_lines.append(
                         f"256,192,{roll_start_time},2,0,B|256:192,1,{slider_length:.2f},0|0,0:0|0:0,{hit_sample}\n"
                     )
                     roll_active = False
@@ -326,7 +326,7 @@ SliderTickRate:1
                 if "finisher" in token_name:
                     spinner_end = current_time + max(time_interval * 2, 1)
                     hit_sample = f"1:0:0:{hitsound_volume}:"
-                    f.write(f"256,192,{current_time},8,0,{spinner_end},{hit_sample}\n")
+                    hitobject_lines.append(f"256,192,{current_time},8,0,{spinner_end},{hit_sample}\n")
                     current_time += time_interval
                     continue
 
@@ -343,8 +343,13 @@ SliderTickRate:1
                 addition_set = 2 if "ka" in token_name else 0
                 hit_sample = f"1:{addition_set}:0:{hitsound_volume}:"
 
-                f.write(f"256,192,{current_time},{note_type},{hit_sound},{hit_sample}\n")
+                hitobject_lines.append(f"256,192,{current_time},{note_type},{hit_sound},{hit_sample}\n")
                 current_time += time_interval
+            content = osu_header + "".join(hitobject_lines)
+            export_issues = validate_exported_osu(content)
+            for issue in export_issues:
+                print(f"Warning: export validation - {issue}")
+            f.write(content)
         print("Chart saved successfully.")
     except IOError as e:
         print(f"Error saving chart file: {e}")
@@ -378,6 +383,50 @@ def normalize_export_tokens(token_names):
         print("Warning: Auto-appended roll_end token during export normalization.")
 
     return normalized
+
+
+def validate_exported_osu(content):
+    """Validate structural constraints in exported `.osu` content."""
+    issues = []
+    required_sections = ["[General]", "[Metadata]", "[Difficulty]", "[TimingPoints]", "[HitObjects]"]
+    for section in required_sections:
+        if section not in content:
+            issues.append(f"missing section: {section}")
+
+    lines = content.splitlines()
+    hitobject_start = None
+    for idx, line in enumerate(lines):
+        if line.strip() == "[HitObjects]":
+            hitobject_start = idx + 1
+            break
+    if hitobject_start is None:
+        return issues
+
+    hit_lines = [line for line in lines[hitobject_start:] if line.strip()]
+    prev_time = -1
+    for i, line in enumerate(hit_lines):
+        parts = line.split(",")
+        if len(parts) < 6:
+            issues.append(f"hitobject line {i+1} has too few fields")
+            continue
+        try:
+            t = int(parts[2])
+        except ValueError:
+            issues.append(f"hitobject line {i+1} has non-integer time")
+            continue
+        if t < prev_time:
+            issues.append(f"hitobject line {i+1} time is not monotonic")
+        prev_time = t
+
+        try:
+            obj_type = int(parts[3])
+        except ValueError:
+            issues.append(f"hitobject line {i+1} has invalid type")
+            continue
+        if obj_type & 2 and len(parts) < 8:
+            issues.append(f"slider line {i+1} missing slider fields")
+
+    return issues
 
 
 def main():
