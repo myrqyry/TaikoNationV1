@@ -34,6 +34,8 @@ def test_save_osu_chart_writes_timing_points(tmp_path: Path):
     assert len(hit_lines) == 3
     times = [int(line.split(",")[2]) for line in hit_lines]
     assert times == [800, 1000, 1200]
+    assert hit_lines[0].endswith("1:0:0:70:")
+    assert hit_lines[1].endswith("1:2:0:70:")
 
 
 def test_save_osu_chart_supports_rolls_and_finisher(tmp_path: Path):
@@ -61,3 +63,17 @@ def test_save_osu_chart_supports_rolls_and_finisher(tmp_path: Path):
     spinner_lines = [line for line in lines if ",8,0," in line]
     assert slider_lines, "Expected at least one drumroll (slider) hitobject"
     assert spinner_lines, "Expected at least one spinner/denden-style hitobject"
+
+
+def test_save_osu_chart_clamps_hitsound_volume(tmp_path: Path):
+    tokenizer = TaikoTokenizer()
+    output = tmp_path / "chart_volume.osu"
+    save_osu_chart(
+        [tokenizer.vocab["don"]],
+        tokenizer,
+        str(output),
+        audio_filename="song.wav",
+        hitsound_volume=999,
+    )
+    line = [l for l in output.read_text().splitlines() if l.startswith("256,192,")][0]
+    assert line.endswith("1:0:0:100:")

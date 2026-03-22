@@ -65,7 +65,7 @@ The taiko ecosystem has known conversion behaviors involving short sliders, low 
 
 1. ✅ **Add `[TimingPoints]` emission** and align note times to beat-derived timestamps (not fixed 200 ms).
 2. 🟡 **Add drumroll/denden token support** and proper object writing in exporter (now partially implemented; needs gameplay validation/tuning).
-3. **Add `hitSample` modeling** (volume/sampleset/index controls) and configurable taiko sample profiles.
+3. 🟡 **Add `hitSample` modeling** (volume/sampleset/index controls) and configurable taiko sample profiles (basic volume/set routing now present; profile-level control still pending).
 4. **Add section annotations (kiai + SV lanes)** from model outputs or post-processing heuristics.
 5. **Add validation against osu! file-format constraints** before export.
 

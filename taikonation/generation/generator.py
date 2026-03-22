@@ -230,6 +230,7 @@ def save_osu_chart(
     tags="",
     bpm=120.0,
     offset_ms=1000,
+    hitsound_volume=70,
 ):
     """Saves the generated tokens to a basic .osu file."""
     print(f"Saving chart to {output_path}...")
@@ -253,6 +254,7 @@ def save_osu_chart(
     beat_length = 60000.0 / max(float(bpm), 1.0)
     slider_velocity_multiplier = -100.0
     slider_multiplier = 1.4
+    hitsound_volume = max(0, min(int(hitsound_volume), 100))
     osu_header = f"""osu file format v14
 [General]
 AudioFilename: {os.path.basename(audio_filename)}
@@ -312,8 +314,9 @@ SliderTickRate:1
                     # slider length formula approximation:
                     # duration_ms ≈ (pixel_length * beat_length) / (slider_multiplier * 100)
                     slider_length = max((roll_duration * slider_multiplier * 100.0) / beat_length, 1.0)
+                    hit_sample = f"1:0:0:{hitsound_volume}:"
                     f.write(
-                        f"256,192,{roll_start_time},2,0,B|256:192,1,{slider_length:.2f},0|0,0:0|0:0,0:0:0:0:\n"
+                        f"256,192,{roll_start_time},2,0,B|256:192,1,{slider_length:.2f},0|0,0:0|0:0,{hit_sample}\n"
                     )
                     roll_active = False
                     current_time += time_interval
@@ -321,7 +324,8 @@ SliderTickRate:1
 
                 if "finisher" in token_name:
                     spinner_end = current_time + max(time_interval * 2, 1)
-                    f.write(f"256,192,{current_time},8,0,{spinner_end},0:0:0:0:\n")
+                    hit_sample = f"1:0:0:{hitsound_volume}:"
+                    f.write(f"256,192,{current_time},8,0,{spinner_end},{hit_sample}\n")
                     current_time += time_interval
                     continue
 
@@ -335,8 +339,10 @@ SliderTickRate:1
                     hit_sound |= 8  # Clap for ka
                 if "big" in token_name:
                     hit_sound |= 4  # Finish for big notes
+                addition_set = 2 if "ka" in token_name else 0
+                hit_sample = f"1:{addition_set}:0:{hitsound_volume}:"
 
-                f.write(f"256,192,{current_time},{note_type},{hit_sound},0:0:0:0:\n")
+                f.write(f"256,192,{current_time},{note_type},{hit_sound},{hit_sample}\n")
                 current_time += time_interval
         print("Chart saved successfully.")
     except IOError as e:
@@ -358,6 +364,7 @@ def main():
     parser.add_argument("--tags", default="", help="Tags for .osu metadata.")
     parser.add_argument("--bpm", type=float, default=120.0, help="Base BPM for exported timing points.")
     parser.add_argument("--offset-ms", type=int, default=1000, help="First timing point offset in milliseconds.")
+    parser.add_argument("--hitsound-volume", type=int, default=70, help="Per-object hitSample volume (0-100).")
     parser.add_argument("--quantize", action="store_true", help="Apply INT8 dynamic quantization to the model (CPU only).")
 
     args = parser.parse_args()
@@ -414,7 +421,7 @@ def main():
     # --- Generate and Save ---
     generated_token_ids = generate_chart(model, audio_features, tokenizer, difficulty_id, config, device, temperature=args.temperature)
     save_osu_chart(generated_token_ids, tokenizer, args.output_path, args.audio_path,
-                   title=args.title, artist=args.artist, source=args.source, tags=args.tags, bpm=args.bpm, offset_ms=args.offset_ms)
+                   title=args.title, artist=args.artist, source=args.source, tags=args.tags, bpm=args.bpm, offset_ms=args.offset_ms, hitsound_volume=args.hitsound_volume)
 
 
 if __name__ == "__main__":
