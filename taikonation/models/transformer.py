@@ -76,8 +76,10 @@ class TaikoTransformer(nn.Module):
         """Compile the model with torch.compile if not already compiled."""
         if not self._compiled and hasattr(torch, 'compile'):
             print("Compiling the model...")
-            torch.compile(self, mode="default", dynamic=True)
-            self._compiled = True
+            compiled_model = torch.compile(self, mode="default", dynamic=True)
+            compiled_model._compiled = True
+            return compiled_model
+        return self
 
     def forward(self, src, tgt, genre_id, difficulty_id):
         # Input validation

@@ -35,6 +35,7 @@ class TaikoTokenizer:
         # Generate the vocabulary
         self.vocab = self._generate_vocabulary()
         self.reverse_vocab = {v: k for k, v in self.vocab.items()}
+        self.id_to_token = self.reverse_vocab
 
     def _generate_vocabulary(self):
         """

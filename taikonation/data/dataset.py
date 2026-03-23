@@ -27,6 +27,9 @@ class TaikoTransformerDataset(Dataset):
         self.time_quantization_ms = time_quantization_ms
         self.cache_dir = cache_dir
         self.prefetch = prefetch
+        self._cache = {}
+        self._cache_keys = []
+        self._max_cache = 512
         os.makedirs(cache_dir, exist_ok=True)
         self._preprocess_audio_async()
 
@@ -66,24 +69,32 @@ class TaikoTransformerDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
-    def __getitem__(self, idx):
-        if self.prefetch and not hasattr(self, '_cache'):
-            self._cache = {}
+    def _get_cached(self, idx, cache_path):
+        if idx in self._cache:
+            return self._cache[idx]
+        features = np.load(cache_path)
+        if len(self._cache_keys) >= self._max_cache:
+            evict = self._cache_keys.pop(0)
+            del self._cache[evict]
+        self._cache[idx] = features
+        self._cache_keys.append(idx)
+        return features
 
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
         cache_path = os.path.join(self.cache_dir, f"spec_{idx}.npy")
 
-        if self.prefetch and idx in self._cache:
-            audio_features = self._cache[idx]
-        else:
-            if not os.path.exists(cache_path):
-                return None
-            try:
+        if not os.path.exists(cache_path):
+            return None
+
+        try:
+            if self.prefetch:
+                audio_features = self._get_cached(idx, cache_path)
+            else:
                 audio_features = np.load(cache_path)
-                if self.prefetch:
-                    self._cache[idx] = audio_features
-            except Exception as e:
-                print(f"Warning: Could not load {cache_path}: {e}")
-                return None
+        except Exception as e:
+            print(f"Warning: Could not load {cache_path}: {e}")
+            return None
 
         if audio_features.ndim != 2 or audio_features.shape[0] == 0:
             print(f"Warning: Corrupt audio features in {cache_path}, shape is {audio_features.shape}")
