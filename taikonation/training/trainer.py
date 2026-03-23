@@ -43,6 +43,7 @@ class CheckpointManager:
             filename = f'last_epoch{epoch}_{timestamp}.pth'
 
         checkpoint_path = self.checkpoint_dir / filename
+        config['model']['num_genres'] = model.genre_embedding.num_embeddings
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
@@ -287,86 +288,51 @@ def train_fold(config, fold_idx):
 
     with ExperimentTracker(f"train_fold_{fold_idx}", config) as tracker:
         train_loader, val_loader, tokenizer, genre_vocab = get_transformer_data_loaders(config, fold_idx)
-    if not train_loader:
-        wandb.finish()
-        return
+        if not train_loader:
+            wandb.finish()
+            return
 
-    model = TaikoTransformer(
-        vocab_size=tokenizer.vocab_size,
-        num_genres=len(genre_vocab),
-        num_difficulties=len(DIFFICULTY_MAP),
-        **config['model']
-    ).to(device)
-    wandb.watch(model, log="all")
+        model = TaikoTransformer(
+            vocab_size=tokenizer.vocab_size,
+            num_genres=len(genre_vocab),
+            num_difficulties=len(DIFFICULTY_MAP),
+            **config['model']
+        ).to(device)
+        wandb.watch(model, log="all")
 
-    criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.vocab["[PAD]"])
-    total_steps = len(train_loader) * config['training']['num_epochs']
-    optimizer, scheduler = create_optimizer_and_scheduler(model, config, total_steps)
-    scaler = torch.cuda.amp.GradScaler()
+        criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.vocab["[PAD]"])
+        total_steps = len(train_loader) * config['training']['num_epochs']
+        optimizer, scheduler = create_optimizer_and_scheduler(model, config, total_steps)
+        scaler = torch.cuda.amp.GradScaler()
 
-    best_val_loss = float('inf')
+        best_val_loss = float('inf')
 
-    checkpoint_dir = Path(config['training']['save_path']).parent / f'checkpoints_fold{fold_idx+1}'
-    checkpoint_manager = CheckpointManager(
-        checkpoint_dir,
-        keep_best_n=config['training'].get('keep_best_n', 3),
-        keep_last_n=config['training'].get('keep_last_n', 2),
-        save_every_n_epochs=config['training'].get('save_every_n_epochs', 5)
-    )
+        checkpoint_dir = Path(config['training']['save_path']).parent / f'checkpoints_fold{fold_idx+1}'
+        checkpoint_manager = CheckpointManager(
+            checkpoint_dir,
+            keep_best_n=config['training'].get('keep_best_n', 3),
+            keep_last_n=config['training'].get('keep_last_n', 2),
+            save_every_n_epochs=config['training'].get('save_every_n_epochs', 5)
+        )
 
-    early_stopping = EarlyStopping(
-        patience=config['training'].get('early_stopping_patience', 10),
-        min_delta=config['training'].get('early_stopping_delta', 1e-4),
-        mode='min',
-        verbose=True
-    )
+        early_stopping = EarlyStopping(
+            patience=config['training'].get('early_stopping_patience', 10),
+            min_delta=config['training'].get('early_stopping_delta', 1e-4),
+            mode='min',
+            verbose=True
+        )
 
-    desired_batch_size = config['training'].get('effective_batch_size', 32)
-    actual_batch_size = config['training']['batch_size']
-    accumulation_steps = max(1, desired_batch_size // actual_batch_size)
-    print(f"Using gradient accumulation: {accumulation_steps} steps")
-    print(f"Effective batch size: {actual_batch_size * accumulation_steps}")
+        desired_batch_size = config['training'].get('effective_batch_size', 32)
+        actual_batch_size = config['training']['batch_size']
+        accumulation_steps = max(1, desired_batch_size // actual_batch_size)
+        print(f"Using gradient accumulation: {accumulation_steps} steps")
+        print(f"Effective batch size: {actual_batch_size * accumulation_steps}")
 
-    for epoch in range(config['training']['num_epochs']):
-        model.train()
-        train_metrics = MetricsTracker(tokenizer)
-        optimizer.zero_grad()
-        for batch_idx, batch in enumerate(train_loader):
-            if not batch: continue
-            encoder_input = batch["encoder_input"].to(device)
-            decoder_input = batch["decoder_input"].to(device)
-            target = batch["target"].to(device)
-            genre_id = batch["genre_id"].to(device)
-            difficulty_id = batch["difficulty"].to(device)
-
-            with torch.cuda.amp.autocast():
-                output = model(encoder_input, decoder_input, genre_id, difficulty_id)
-                loss = criterion(output.view(-1, tokenizer.vocab_size), target.view(-1))
-                loss = loss / accumulation_steps
-
-            scaler.scale(loss).backward()
-            train_metrics.update(output, target, loss * accumulation_steps)
-
-            if (batch_idx + 1) % accumulation_steps == 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
-                if config['training'].get('scheduler_type') in ['cosine_warmup']:
-                    scheduler.step()
-
-        if (batch_idx + 1) % accumulation_steps != 0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
+        for epoch in range(config['training']['num_epochs']):
+            model.train()
+            train_metrics = MetricsTracker(tokenizer)
             optimizer.zero_grad()
-
-        model.eval()
-        val_metrics = MetricsTracker(tokenizer)
-        with torch.no_grad():
-            for batch in val_loader:
+            for batch_idx, batch in enumerate(train_loader):
                 if not batch: continue
                 encoder_input = batch["encoder_input"].to(device)
                 decoder_input = batch["decoder_input"].to(device)
@@ -374,74 +340,108 @@ def train_fold(config, fold_idx):
                 genre_id = batch["genre_id"].to(device)
                 difficulty_id = batch["difficulty"].to(device)
 
-                output = model(encoder_input, decoder_input, genre_id, difficulty_id)
-                loss = criterion(output.view(-1, tokenizer.vocab_size), target.view(-1))
-                val_metrics.update(output, target, loss)
+                with torch.cuda.amp.autocast():
+                    output = model(encoder_input, decoder_input, genre_id, difficulty_id)
+                    loss = criterion(output.view(-1, tokenizer.vocab_size), target.view(-1))
+                    loss = loss / accumulation_steps
 
-        train_results = train_metrics.compute()
-        val_results = val_metrics.compute()
+                scaler.scale(loss).backward()
+                train_metrics.update(output, target, loss * accumulation_steps)
 
-        if config['training'].get('scheduler_type') not in ['cosine_warmup']:
-            scheduler.step(val_results['loss'])
+                if (batch_idx + 1) % accumulation_steps == 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
+                    if config['training'].get('scheduler_type') in ['cosine_warmup']:
+                        scheduler.step()
 
-        wandb.log({
-            'epoch': epoch,
-            'train/loss': train_results['loss'],
-            'train/accuracy': train_results['accuracy'],
-            'train/perplexity': train_results['perplexity'],
-            'val/loss': val_results['loss'],
-            'val/accuracy': val_results['accuracy'],
-            'val/perplexity': val_results['perplexity'],
-            'val/f1_macro': val_results['f1_scores']['macro'],
-            'learning_rate': optimizer.param_groups[0]['lr']
-        })
+            if (batch_idx + 1) % accumulation_steps != 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
-        for note_type, acc in val_results['note_accuracies'].items():
-            wandb.log({f'val/accuracy_{note_type}': acc})
+            model.eval()
+            val_metrics = MetricsTracker(tokenizer)
+            with torch.no_grad():
+                for batch in val_loader:
+                    if not batch: continue
+                    encoder_input = batch["encoder_input"].to(device)
+                    decoder_input = batch["decoder_input"].to(device)
+                    target = batch["target"].to(device)
+                    genre_id = batch["genre_id"].to(device)
+                    difficulty_id = batch["difficulty"].to(device)
 
-        print(f"Epoch {epoch+1}/{config['training']['num_epochs']}")
-        print(f"  Train - Loss: {train_results['loss']:.4f}, Acc: {train_results['accuracy']:.4f}, PPL: {train_results['perplexity']:.2f}")
-        print(f"  Val   - Loss: {val_results['loss']:.4f}, Acc: {val_results['accuracy']:.4f}, PPL: {val_results['perplexity']:.2f}")
+                    output = model(encoder_input, decoder_input, genre_id, difficulty_id)
+                    loss = criterion(output.view(-1, tokenizer.vocab_size), target.view(-1))
+                    val_metrics.update(output, target, loss)
 
-        checkpoint_manager.save_checkpoint(
-            model, optimizer, epoch, val_results['loss'],
-            config, checkpoint_type='last'
-        )
+            train_results = train_metrics.compute()
+            val_results = val_metrics.compute()
 
-        if val_results['loss'] < best_val_loss:
-            best_val_loss = val_results['loss']
+            if config['training'].get('scheduler_type') not in ['cosine_warmup']:
+                scheduler.step(val_results['loss'])
+
+            wandb.log({
+                'epoch': epoch,
+                'train/loss': train_results['loss'],
+                'train/accuracy': train_results['accuracy'],
+                'train/perplexity': train_results['perplexity'],
+                'val/loss': val_results['loss'],
+                'val/accuracy': val_results['accuracy'],
+                'val/perplexity': val_results['perplexity'],
+                'val/f1_macro': val_results['f1_scores']['macro'],
+                'learning_rate': optimizer.param_groups[0]['lr']
+            })
+
+            for note_type, acc in val_results['note_accuracies'].items():
+                wandb.log({f'val/accuracy_{note_type}': acc})
+
+            print(f"Epoch {epoch+1}/{config['training']['num_epochs']}")
+            print(f"  Train - Loss: {train_results['loss']:.4f}, Acc: {train_results['accuracy']:.4f}, PPL: {train_results['perplexity']:.2f}")
+            print(f"  Val   - Loss: {val_results['loss']:.4f}, Acc: {val_results['accuracy']:.4f}, PPL: {val_results['perplexity']:.2f}")
+
             checkpoint_manager.save_checkpoint(
                 model, optimizer, epoch, val_results['loss'],
-                config, checkpoint_type='best'
-            )
-            print(f"  ✓ New best model saved!")
-
-        if checkpoint_manager.should_save_periodic(epoch):
-            checkpoint_manager.save_checkpoint(
-                model, optimizer, epoch, val_results['loss'],
-                config, checkpoint_type='periodic'
+                config, checkpoint_type='last'
             )
 
-        if early_stopping(epoch, val_results['loss']):
-            print(f"\nEarly stopping triggered at epoch {epoch+1}")
-            print(f"Best epoch was {early_stopping.best_epoch+1} with val_loss={-early_stopping.best_score:.4f}")
-            tracker.log_metric("best_epoch", early_stopping.best_epoch + 1)
-            tracker.log_metric("best_val_loss", -early_stopping.best_score)
-            break
+            if val_results['loss'] < best_val_loss:
+                best_val_loss = val_results['loss']
+                checkpoint_manager.save_checkpoint(
+                    model, optimizer, epoch, val_results['loss'],
+                    config, checkpoint_type='best'
+                )
+                print(f"  ✓ New best model saved!")
 
-    if config['training'].get('cleanup_checkpoints', False):
-        checkpoint_manager.cleanup_all_except_best()
+            if checkpoint_manager.should_save_periodic(epoch):
+                checkpoint_manager.save_checkpoint(
+                    model, optimizer, epoch, val_results['loss'],
+                    config, checkpoint_type='periodic'
+                )
 
-    print("--- Finished Supervised Training ---")
-    tracker.log_metrics({"final_train_results": train_results, "final_val_results": val_results})
+            if early_stopping(epoch, val_results['loss']):
+                print(f"\nEarly stopping triggered at epoch {epoch+1}")
+                print(f"Best epoch was {early_stopping.best_epoch+1} with val_loss={-early_stopping.best_score:.4f}")
+                tracker.log_metric("best_epoch", early_stopping.best_epoch + 1)
+                tracker.log_metric("best_val_loss", -early_stopping.best_score)
+                break
 
+        if config['training'].get('cleanup_checkpoints', False):
+            checkpoint_manager.cleanup_all_except_best()
 
-    genre_vocab_path = os.path.join(os.path.dirname(config['training']['save_path']), "genre_vocab.json")
-    with open(genre_vocab_path, 'w') as f:
-        json.dump(genre_vocab, f)
-    print(f"Genre vocabulary saved to {genre_vocab_path}")
+        print("--- Finished Supervised Training ---")
+        tracker.log_metrics({"final_train_results": train_results, "final_val_results": val_results})
 
-    wandb.finish()
+        genre_vocab_path = os.path.join(os.path.dirname(config['training']['save_path']), "genre_vocab.json")
+        with open(genre_vocab_path, 'w') as f:
+            json.dump(genre_vocab, f)
+        print(f"Genre vocabulary saved to {genre_vocab_path}")
+
+        wandb.finish()
 
 def main(config):
     os.environ["WANDB_MODE"] = "offline"

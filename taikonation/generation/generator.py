@@ -18,10 +18,12 @@ class EnhancedChartGenerator:
     Chart generator using both standard audio features and MediaPipe classifications
     """
 
-    def __init__(self, model, use_mediapipe=True):
+    def __init__(self, model, config_path='config/default.yaml', use_mediapipe=True):
         self.model = model
         self.use_mediapipe = use_mediapipe
         self.mediapipe_analyzer = MediaPipeAudioAnalyzer() if use_mediapipe else None
+        self._tokenizer = TaikoTokenizer()
+        self._config = load_config(config_path)
 
     def generate(self, audio_path, difficulty, mediapipe_data=None):
         """
@@ -84,9 +86,9 @@ class EnhancedChartGenerator:
             section_chart = generate_chart(
                 self.model,
                 section_features,
-                TaikoTokenizer(),
+                self._tokenizer,
                 difficulty,
-                load_config('config/default.yaml'),
+                self._config,
                 'cpu',
                 density_bias=density_bias
             )
@@ -99,7 +101,7 @@ class EnhancedChartGenerator:
         return full_chart
 
     def generate_standard(self, features, difficulty):
-        return generate_chart(self.model, features, TaikoTokenizer(), difficulty, load_config('config/default.yaml'), 'cpu')
+        return generate_chart(self.model, features, self._tokenizer, difficulty, self._config, 'cpu')
 
 def load_config(config_path):
     """Loads a YAML configuration file."""
@@ -109,13 +111,15 @@ def load_config(config_path):
 
 def load_model(checkpoint_path, config, device, quantize=False):
     """Loads a trained model from a checkpoint."""
-    # We need to know the vocab size and number of genres/difficulties to init the model.
-    # This info should ideally be saved in the checkpoint. For now, let's assume
-    # we can derive them or use placeholders.
-    # Placeholder values - these should be updated based on the actual training data/vocab
     vocab_size = TaikoTokenizer().vocab_size
-    num_genres = 10 # Placeholder
     num_difficulties = len(DIFFICULTY_MAP)
+    num_genres = 10  # Fallback
+
+    checkpoint = None
+    if os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+        if isinstance(checkpoint, dict) and 'model_config' in checkpoint:
+            num_genres = checkpoint['model_config'].get('num_genres', num_genres)
 
     model = TaikoTransformer(
         vocab_size=vocab_size,
@@ -131,11 +135,7 @@ def load_model(checkpoint_path, config, device, quantize=False):
         max_sequence_length=config['data']['max_sequence_length']
     ).to(device)
 
-    # Load the trained weights
-    if os.path.exists(checkpoint_path):
-        # Use weights_only=True for security
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
-        # It's good practice to save model's state_dict in a dictionary
+    if checkpoint:
         if 'model_state_dict' in checkpoint:
             model.load_state_dict(checkpoint['model_state_dict'])
         else:
@@ -167,7 +167,8 @@ def generate_chart(
     device,
     temperature=1.0,
     progress_callback: Optional[Callable[[int, str], None]] = None,
-    density_bias=1.0
+    density_bias=1.0,
+    genre_id=0
 ):
     """
     Generate a chart with optional progress reporting.
@@ -186,10 +187,10 @@ def generate_chart(
         progress_callback(5, "Initialized generation pipeline")
 
     for step in range(max_len - 1):
-        genre_id = torch.tensor([0], dtype=torch.long).to(device)
+        genre_id_tensor = torch.tensor([genre_id], dtype=torch.long).to(device)
         difficulty_tensor = torch.tensor([difficulty_id], dtype=torch.long).to(device)
 
-        output_logits = model(encoder_input, decoder_input, genre_id, difficulty_tensor)
+        output_logits = model(encoder_input, decoder_input, genre_id_tensor, difficulty_tensor)
         next_token_logits = output_logits[:, -1, :]
 
         if temperature != 1.0:
@@ -499,7 +500,7 @@ def main():
         return
 
     # --- Generate and Save ---
-    generated_token_ids = generate_chart(model, audio_features, tokenizer, difficulty_id, config, device, temperature=args.temperature)
+    generated_token_ids = generate_chart(model, audio_features, tokenizer, difficulty_id, config, device, temperature=args.temperature, genre_id=0)
     save_osu_chart(generated_token_ids, tokenizer, args.output_path, args.audio_path,
                    title=args.title, artist=args.artist, source=args.source, tags=args.tags, bpm=args.bpm, offset_ms=args.offset_ms, hitsound_volume=args.hitsound_volume)
 

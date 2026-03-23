@@ -65,13 +65,15 @@ def augment_spectrogram(spectrogram, freq_mask_param=27, time_mask_param=50):
     num_time_steps, num_mels = augmented_spec.shape
 
     # --- Frequency Masking ---
-    f = np.random.uniform(low=0.0, high=freq_mask_param)
-    f0 = np.random.randint(0, num_mels - int(f))
-    augmented_spec[:, f0:f0 + int(f)] = 0
+    f = int(np.random.uniform(low=0.0, high=min(freq_mask_param, num_mels - 1)))
+    if f > 0:
+        f0 = np.random.randint(0, num_mels - f)
+        augmented_spec[:, f0:f0 + f] = 0
 
     # --- Time Masking ---
-    t = np.random.uniform(low=0.0, high=time_mask_param)
-    t0 = np.random.randint(0, num_time_steps - int(t))
-    augmented_spec[t0:t0 + int(t), :] = 0
+    t = int(np.random.uniform(low=0.0, high=min(time_mask_param, num_time_steps - 1)))
+    if t > 0:
+        t0 = np.random.randint(0, num_time_steps - t)
+        augmented_spec[t0:t0 + t, :] = 0
 
     return augmented_spec
